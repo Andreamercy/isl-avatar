@@ -1,4 +1,23 @@
+# MediaPipe model files (auto-downloaded on first run, ~150MB)
 models/
+
+# Extracted motion JSONs (generated output, can be large)
+motion_data/
+
+# Binary avatar assets — use Git LFS or share separately
+*.glb
+*.gltf
+
+# Video source files
+*.mp4
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
 .DS_Store
+Thumbs.db

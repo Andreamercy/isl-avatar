@@ -39,6 +39,7 @@
   }
   #status.ok  { color: #6ee7b7; background: rgba(110,231,183,0.08); }
   #status.err { color: #fca5a5; background: rgba(252,165,165,0.08); }
+  #status.info { color: #93c5fd; background: rgba(147,197,253,0.08); }
 
   /* ── Controls ───────────────────────────────────────────────────── */
   .controls { display: flex; gap: 8px; }
@@ -178,10 +179,10 @@
 
   <!-- Stats -->
   <div class="stats" id="stats">
-    Frames: <span>—</span><br>
-    FPS: <span>—</span><br>
-    Duration: <span>—</span><br>
-    Landmarks/frame: <span>—</span>
+    Frames: <span id="stat-frames">—</span><br>
+    FPS: <span id="stat-fps">—</span><br>
+    Duration: <span id="stat-dur">—</span><br>
+    Landmarks/frame: <span id="stat-lm">—</span>
   </div>
 </div>
 
@@ -197,12 +198,11 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { GLTFLoader }       from 'three/addons/loaders/GLTFLoader.js';
-import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
-import { RGBELoader }       from 'three/addons/loaders/RGBELoader.js';
+import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MediaPipe Pose indices for the joints we care about (upper body)
+// MediaPipe Pose landmark indices
 // ─────────────────────────────────────────────────────────────────────────────
 const POSE_IDX = {
   NOSE:           0,
@@ -212,53 +212,37 @@ const POSE_IDX = {
   LEFT_HIP:       23, RIGHT_HIP:      24,
 };
 
-// MediaPipe Hand landmark indices
-const HAND_IDX = {
-  WRIST:          0,
-  THUMB_CMC:1, THUMB_MCP:2, THUMB_IP:3,  THUMB_TIP:4,
-  INDEX_MCP:5, INDEX_PIP:6, INDEX_DIP:7, INDEX_TIP:8,
-  MIDDLE_MCP:9, MIDDLE_PIP:10, MIDDLE_DIP:11, MIDDLE_TIP:12,
-  RING_MCP:13,  RING_PIP:14,  RING_DIP:15,  RING_TIP:16,
-  PINKY_MCP:17, PINKY_PIP:18, PINKY_DIP:19, PINKY_TIP:20,
-};
-
-// ── Map MediaPipe hand indices → GLB bone names ──────────────────────────────
+// MediaPipe hand → GLB bone maps
 const LEFT_HAND_BONE_MAP = {
-  // Thumb
-  1:'LeftHandThumb1', 2:'LeftHandThumb2', 3:'LeftHandThumb3', 4:'LeftHandThumb4',
-  // Index
-  5:'LeftHandIndex1', 6:'LeftHandIndex2', 7:'LeftHandIndex3', 8:'LeftHandIndex4',
-  // Middle
-  9:'LeftHandMiddle1',10:'LeftHandMiddle2',11:'LeftHandMiddle3',12:'LeftHandMiddle4',
-  // Ring
-  13:'LeftHandRing1', 14:'LeftHandRing2', 15:'LeftHandRing3', 16:'LeftHandRing4',
-  // Pinky
-  17:'LeftHandPinky1',18:'LeftHandPinky2',19:'LeftHandPinky3',20:'LeftHandPinky4',
+  1:'LeftHandThumb1',  2:'LeftHandThumb2',  3:'LeftHandThumb3',  4:'LeftHandThumb4',
+  5:'LeftHandIndex1',  6:'LeftHandIndex2',  7:'LeftHandIndex3',  8:'LeftHandIndex4',
+  9:'LeftHandMiddle1', 10:'LeftHandMiddle2', 11:'LeftHandMiddle3', 12:'LeftHandMiddle4',
+  13:'LeftHandRing1',  14:'LeftHandRing2',   15:'LeftHandRing3',   16:'LeftHandRing4',
+  17:'LeftHandPinky1', 18:'LeftHandPinky2',  19:'LeftHandPinky3',  20:'LeftHandPinky4',
 };
-
 const RIGHT_HAND_BONE_MAP = {
-  1:'RightHandThumb1', 2:'RightHandThumb2', 3:'RightHandThumb3', 4:'RightHandThumb4',
-  5:'RightHandIndex1', 6:'RightHandIndex2', 7:'RightHandIndex3', 8:'RightHandIndex4',
-  9:'RightHandMiddle1',10:'RightHandMiddle2',11:'RightHandMiddle3',12:'RightHandMiddle4',
-  13:'RightHandRing1', 14:'RightHandRing2', 15:'RightHandRing3', 16:'RightHandRing4',
-  17:'RightHandPinky1',18:'RightHandPinky2',19:'RightHandPinky3',20:'RightHandPinky4',
+  1:'RightHandThumb1',  2:'RightHandThumb2',  3:'RightHandThumb3',  4:'RightHandThumb4',
+  5:'RightHandIndex1',  6:'RightHandIndex2',  7:'RightHandIndex3',  8:'RightHandIndex4',
+  9:'RightHandMiddle1', 10:'RightHandMiddle2', 11:'RightHandMiddle3', 12:'RightHandMiddle4',
+  13:'RightHandRing1',  14:'RightHandRing2',   15:'RightHandRing3',   16:'RightHandRing4',
+  17:'RightHandPinky1', 18:'RightHandPinky2',  19:'RightHandPinky3',  20:'RightHandPinky4',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scene setup
+// Scene
 // ─────────────────────────────────────────────────────────────────────────────
 const container = document.getElementById('canvas-container');
 const renderer  = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(container.clientWidth, container.clientHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled  = true;
+renderer.shadowMap.type     = THREE.PCFSoftShadowMap;
 renderer.toneMapping        = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
 renderer.outputColorSpace   = THREE.SRGBColorSpace;
 container.appendChild(renderer.domElement);
 
-const scene  = new THREE.Scene();
+const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0e0e14);
 scene.fog        = new THREE.Fog(0x0e0e14, 8, 20);
 
@@ -273,24 +257,15 @@ controls.minDistance   = 0.5;
 controls.maxDistance   = 8;
 controls.update();
 
-// Lights
-const ambient  = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambient);
-
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const key = new THREE.DirectionalLight(0xffffff, 1.8);
-key.position.set(2, 4, 3);
-key.castShadow = true;
+key.position.set(2, 4, 3); key.castShadow = true;
 scene.add(key);
-
 const fill = new THREE.DirectionalLight(0xa78bfa, 0.4);
-fill.position.set(-3, 2, -2);
-scene.add(fill);
-
+fill.position.set(-3, 2, -2); scene.add(fill);
 const rim = new THREE.DirectionalLight(0x60a5fa, 0.3);
-rim.position.set(0, 3, -4);
-scene.add(rim);
+rim.position.set(0, 3, -4); scene.add(rim);
 
-// Floor
 const floor = new THREE.Mesh(
   new THREE.PlaneGeometry(10, 10),
   new THREE.MeshStandardMaterial({ color: 0x111118, roughness: 0.95 })
@@ -298,10 +273,7 @@ const floor = new THREE.Mesh(
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
-
-// Grid
-const grid = new THREE.GridHelper(10, 20, 0x222233, 0x1a1a28);
-scene.add(grid);
+scene.add(new THREE.GridHelper(10, 20, 0x222233, 0x1a1a28));
 
 window.addEventListener('resize', () => {
   camera.aspect = container.clientWidth / container.clientHeight;
@@ -312,61 +284,52 @@ window.addEventListener('resize', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────────────────────
-let avatar       = null;
-let boneMap      = {};
-let motionData   = null;
+let avatar         = null;
+let boneMap        = {};
+let motionData     = null;
 let skeletonHelper = null;
 
-let playing      = false;
-let frameIdx     = 0;
-let speed        = 1.0;
-let looping      = true;
-let lastTime     = 0;
-let frameTimer   = 0;
-let scrubbing    = false;
+let playing    = false;
+let frameIdx   = 0;
+let speed      = 1.0;
+let looping    = true;
+let lastTime   = 0;
+let frameTimer = 0;
+let scrubbing  = false;
+
+// Crossfade state (fix: smooth loop wrap-around)
+const CROSSFADE_FRAMES = 6;   // blend last 6 frames back into frame 0
+let crossfadeAlpha = 1.0;     // 1 = fully current frame, 0 = fully frame 0
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Load GLB
 // ─────────────────────────────────────────────────────────────────────────────
 function loadGLB(url, name) {
-  setStatus(`Loading avatar…`, '');
-  if (avatar) { scene.remove(avatar); boneMap = {}; }
+  setStatus('Loading avatar…', 'info');
+  if (avatar)         { scene.remove(avatar); boneMap = {}; }
   if (skeletonHelper) { scene.remove(skeletonHelper); skeletonHelper = null; }
 
-  const loader = new GLTFLoader();
-  loader.load(url, gltf => {
+  new GLTFLoader().load(url, gltf => {
     avatar = gltf.scene;
     avatar.traverse(obj => {
       if (obj.isMesh) {
-        obj.castShadow    = true;
-        obj.receiveShadow = true;
-        if (obj.material) {
-          obj.material.metalness = 0.0;
-          obj.material.roughness = 0.7;
-        }
+        obj.castShadow = obj.receiveShadow = true;
+        if (obj.material) { obj.material.metalness = 0; obj.material.roughness = 0.7; }
       }
-      if (obj.isBone || obj.type === 'Bone') {
-        boneMap[obj.name] = obj;
-      }
+      if (obj.isBone || obj.type === 'Bone') boneMap[obj.name] = obj;
     });
-
-    // Also capture SkinnedMesh bones via skeleton
     avatar.traverse(obj => {
-      if (obj.isSkinnedMesh && obj.skeleton) {
+      if (obj.isSkinnedMesh && obj.skeleton)
         obj.skeleton.bones.forEach(b => { boneMap[b.name] = b; });
-      }
     });
-
-    console.log('Bones found:', Object.keys(boneMap));
+    console.log('Bones loaded:', Object.keys(boneMap));
     scene.add(avatar);
 
-    // Auto-position: centre at hips ~1m up
     const box = new THREE.Box3().setFromObject(avatar);
-    const h   = box.max.y - box.min.y;
     avatar.position.y = -box.min.y;
 
-    setStatus(`✅ Avatar loaded — ${Object.keys(boneMap).length} bones`, 'ok');
     document.getElementById('glb-name').textContent = name;
+    setStatus(`✅ Avatar loaded — ${Object.keys(boneMap).length} bones`, 'ok');
     tryEnablePlay();
   }, undefined, err => {
     setStatus(`❌ Failed to load GLB: ${err.message}`, 'err');
@@ -374,156 +337,205 @@ function loadGLB(url, name) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Load Motion JSON
+// Validate + load Motion JSON
+//
+// Fix: case-insensitive extension check, specific error messages,
+//      no false "Invalid JSON" when a previous load succeeded.
 // ─────────────────────────────────────────────────────────────────────────────
+function readJSONFile(file) {
+  // FIX 1: Case-insensitive extension check (.JSON and .json both accepted)
+  if (!file.name.toLowerCase().endsWith('.json')) {
+    return Promise.reject(`Expected a .json file, got "${file.name}"`);
+  }
+
+  setStatus(`Reading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`, 'info');
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      let data;
+      // FIX 2: Specific parse error message (not generic "Invalid JSON file")
+      try {
+        data = JSON.parse(ev.target.result);
+      } catch (err) {
+        reject(`JSON syntax error: ${err.message}`);
+        return;
+      }
+
+      // FIX 3: Specific validation errors for each missing field
+      if (!data.frames || !Array.isArray(data.frames)) {
+        reject('Invalid file: missing "frames" array. Was this generated by extract_motion.py?');
+        return;
+      }
+      if (data.frames.length === 0) {
+        reject('Invalid file: "frames" array is empty.');
+        return;
+      }
+      if (typeof data.fps !== 'number' || data.fps <= 0) {
+        reject('Invalid file: "fps" must be a positive number.');
+        return;
+      }
+      if (typeof data.total_frames !== 'number' || data.total_frames <= 0) {
+        reject('Invalid file: "total_frames" must be a positive number.');
+        return;
+      }
+
+      resolve(data);
+    };
+    reader.onerror = () => reject('File read error — the file may be corrupted.');
+    reader.readAsText(file);
+  });
+}
+
 function loadMotionJSON(data, name) {
   motionData = data;
   frameIdx   = 0;
+  frameTimer = 0;
+  crossfadeAlpha = 1.0;
+
   document.getElementById('json-name').textContent = name;
 
-  const dur  = data.total_frames / data.fps;
-  const lmCount = (data.frames[0]?.pose?.length || 0)
-                + (data.frames[0]?.left_hand?.length || 0)
-                + (data.frames[0]?.right_hand?.length || 0)
-                + (data.frames[0]?.face?.length || 0);
+  const dur    = data.total_frames / data.fps;
+  // FIX 4: face no longer in JSON; landmark count is pose + hands only
+  const lmCount = (data.frames[0]?.pose?.length       || 0)
+                + (data.frames[0]?.left_hand?.length   || 0)
+                + (data.frames[0]?.right_hand?.length  || 0);
 
-  document.getElementById('stats').innerHTML = `
-    Frames: <span>${data.total_frames}</span><br>
-    FPS: <span>${data.fps.toFixed(1)}</span><br>
-    Duration: <span>${dur.toFixed(2)}s</span><br>
-    Landmarks/frame: <span>${lmCount}</span>
-  `;
+  document.getElementById('stat-frames').textContent = data.total_frames;
+  document.getElementById('stat-fps').textContent    = data.fps.toFixed(1);
+  document.getElementById('stat-dur').textContent    = dur.toFixed(2) + 's';
+  document.getElementById('stat-lm').textContent     = lmCount;
   document.getElementById('scrubber').max   = data.total_frames - 1;
   document.getElementById('scrubber').value = 0;
   document.getElementById('time-tot').textContent = dur.toFixed(1) + 's';
-  setStatus(`✅ Motion loaded — "${data.word}"  ${data.total_frames} frames @ ${data.fps.toFixed(0)}fps`, 'ok');
+
+  // FIX 5: "word" field may be absent in older JSONs — fallback gracefully
+  const wordLabel = data.word ?? name.replace(/\.json$/i, '').toUpperCase();
+  setStatus(`✅ Motion loaded — "${wordLabel}"  ${data.total_frames} frames @ ${data.fps.toFixed(0)} fps`, 'ok');
   tryEnablePlay();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Apply one frame of motion to the avatar skeleton
+// Apply frame  (with crossfade blend on loop boundary)
 // ─────────────────────────────────────────────────────────────────────────────
-function applyFrame(idx) {
+function applyFrame(idx, alpha) {
   if (!avatar || !motionData) return;
-  const frame = motionData.frames[idx];
-  if (!frame) return;
+  const frame0 = motionData.frames[idx];
+  if (!frame0) return;
 
-  applyPose(frame.pose);
-  applyHand(frame.left_hand,  LEFT_HAND_BONE_MAP,  'Left');
-  applyHand(frame.right_hand, RIGHT_HAND_BONE_MAP, 'Right');
+  // FIX 6: Crossfade on loop wrap — blend the last N frames back toward frame 0
+  // alpha = 1.0 means "fully this frame", 0.0 means "fully frame 0"
+  if (alpha !== undefined && alpha < 1.0 && looping) {
+    const frameA = motionData.frames[idx];
+    const frameB = motionData.frames[0];
+    applyPoseBlended(frameA.pose, frameB.pose, alpha);
+    applyHandBlended(frameA.left_hand,  frameB.left_hand,  LEFT_HAND_BONE_MAP,  'Left',  alpha);
+    applyHandBlended(frameA.right_hand, frameB.right_hand, RIGHT_HAND_BONE_MAP, 'Right', alpha);
+  } else {
+    applyPose(frame0.pose);
+    applyHand(frame0.left_hand,  LEFT_HAND_BONE_MAP,  'Left');
+    applyHand(frame0.right_hand, RIGHT_HAND_BONE_MAP, 'Right');
+  }
 }
 
-// ── Pose → Bones ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Pose application
+// ─────────────────────────────────────────────────────────────────────────────
 function applyPose(pose) {
   if (!pose || pose.length < 25) return;
 
-  const lShoulder = pose[POSE_IDX.LEFT_SHOULDER];
-  const rShoulder = pose[POSE_IDX.RIGHT_SHOULDER];
-  const lElbow    = pose[POSE_IDX.LEFT_ELBOW];
-  const rElbow    = pose[POSE_IDX.RIGHT_ELBOW];
-  const lWrist    = pose[POSE_IDX.LEFT_WRIST];
-  const rWrist    = pose[POSE_IDX.RIGHT_WRIST];
-
-  // Left arm – upper (LeftArm bone)
-  if (boneMap['LeftArm'] && lShoulder && lElbow) {
-    const rot = computeLimbRotation(lShoulder, lElbow, -1);
-    applyBoneRotation('LeftArm', rot);
-  }
-  // Left arm – lower (LeftForeArm bone)
-  if (boneMap['LeftForeArm'] && lElbow && lWrist) {
-    const rot = computeLimbRotation(lElbow, lWrist, -1);
-    applyBoneRotation('LeftForeArm', rot);
-  }
-  // Right arm – upper
-  if (boneMap['RightArm'] && rShoulder && rElbow) {
-    const rot = computeLimbRotation(rShoulder, rElbow, 1);
-    applyBoneRotation('RightArm', rot);
-  }
-  // Right arm – lower
-  if (boneMap['RightForeArm'] && rElbow && rWrist) {
-    const rot = computeLimbRotation(rElbow, rWrist, 1);
-    applyBoneRotation('RightForeArm', rot);
-  }
-
-  // Spine tilt from shoulder midpoint vs hip midpoint
-  if (pose.length > 24) {
-    const lHip = pose[POSE_IDX.LEFT_HIP];
-    const rHip = pose[POSE_IDX.RIGHT_HIP];
-    if (lHip && rHip && lShoulder && rShoulder) {
-      const spineTilt = computeSpineTilt(lShoulder, rShoulder, lHip, rHip);
-      applyBoneRotation('Spine',  spineTilt.clone().multiplyScalar(0.3));
-      applyBoneRotation('Spine1', spineTilt.clone().multiplyScalar(0.4));
-      applyBoneRotation('Spine2', spineTilt.clone().multiplyScalar(0.3));
-    }
-  }
-
-  // Head – from nose position relative to shoulders
+  const lS = pose[POSE_IDX.LEFT_SHOULDER],  rS = pose[POSE_IDX.RIGHT_SHOULDER];
+  const lE = pose[POSE_IDX.LEFT_ELBOW],     rE = pose[POSE_IDX.RIGHT_ELBOW];
+  const lW = pose[POSE_IDX.LEFT_WRIST],     rW = pose[POSE_IDX.RIGHT_WRIST];
+  const lH = pose[POSE_IDX.LEFT_HIP],       rH = pose[POSE_IDX.RIGHT_HIP];
   const nose = pose[POSE_IDX.NOSE];
-  if (nose && lShoulder && rShoulder && boneMap['Head']) {
-    const neckX = (lShoulder.x + rShoulder.x) / 2;
-    const neckY = (lShoulder.y + rShoulder.y) / 2;
-    const dx = (nose.x - neckX) * 1.5;
-    const dy = (nose.y - neckY) * 1.2;
+
+  if (boneMap['LeftArm']     && lS && lE) applyBoneRotation('LeftArm',     computeLimbRotation(lS, lE, -1));
+  if (boneMap['LeftForeArm'] && lE && lW) applyBoneRotation('LeftForeArm', computeLimbRotation(lE, lW, -1));
+  if (boneMap['RightArm']     && rS && rE) applyBoneRotation('RightArm',     computeLimbRotation(rS, rE, 1));
+  if (boneMap['RightForeArm'] && rE && rW) applyBoneRotation('RightForeArm', computeLimbRotation(rE, rW, 1));
+
+  if (lS && rS && lH && rH) {
+    const t = computeSpineTilt(lS, rS, lH, rH);
+    applyBoneRotation('Spine',  new THREE.Euler(t.x*0.3, t.y*0.3, 0));
+    applyBoneRotation('Spine1', new THREE.Euler(t.x*0.4, t.y*0.4, 0));
+    applyBoneRotation('Spine2', new THREE.Euler(t.x*0.3, t.y*0.3, 0));
+  }
+
+  if (nose && lS && rS && boneMap['Head']) {
+    const neckX = (lS.x + rS.x) / 2, neckY = (lS.y + rS.y) / 2;
     const headRot = new THREE.Euler(
-      THREE.MathUtils.clamp(-dy * Math.PI, -0.4, 0.4),
-      THREE.MathUtils.clamp(dx  * Math.PI, -0.5, 0.5),
-      0,
-      'XYZ'
+      THREE.MathUtils.clamp(-(nose.y - neckY) * 1.2 * Math.PI, -0.4, 0.4),
+      THREE.MathUtils.clamp( (nose.x - neckX) * 1.5 * Math.PI, -0.5, 0.5),
+      0, 'XYZ'
     );
     boneMap['Head'].rotation.copy(headRot);
-    if (boneMap['Neck']) {
+    if (boneMap['Neck'])
       boneMap['Neck'].rotation.set(headRot.x * 0.4, headRot.y * 0.3, 0);
-    }
   }
 }
 
-// Compute rotation quaternion from two 3D landmarks (proximal → distal)
+// Blended version for crossfade
+function applyPoseBlended(poseA, poseB, alpha) {
+  if (!poseA || !poseB) { applyPose(poseA || poseB); return; }
+  const blended = poseA.map((lmA, i) => {
+    const lmB = poseB[i];
+    if (!lmB) return lmA;
+    return {
+      x: lmA.x * alpha + lmB.x * (1 - alpha),
+      y: lmA.y * alpha + lmB.y * (1 - alpha),
+      z: (lmA.z || 0) * alpha + (lmB.z || 0) * (1 - alpha),
+    };
+  });
+  applyPose(blended);
+}
+
 function computeLimbRotation(from, to, side) {
   const dir = new THREE.Vector3(
-    (to.x - from.x) * side,   // mirror for right side
-    -(to.y - from.y),          // flip Y (MediaPipe Y is down)
+    (to.x - from.x) * side,
+    -(to.y - from.y),
     (to.z || 0) - (from.z || 0)
   ).normalize();
-
-  const defaultDir = new THREE.Vector3(side, -1, 0).normalize();
-  const q = new THREE.Quaternion().setFromUnitVectors(defaultDir, dir);
-  return new THREE.Euler().setFromQuaternion(q, 'XYZ');
+  const def = new THREE.Vector3(side, -1, 0).normalize();
+  return new THREE.Euler().setFromQuaternion(
+    new THREE.Quaternion().setFromUnitVectors(def, dir), 'XYZ'
+  );
 }
 
 function computeSpineTilt(lS, rS, lH, rH) {
-  const shoulderMid = { x: (lS.x + rS.x) / 2, y: (lS.y + rS.y) / 2 };
-  const hipMid      = { x: (lH.x + rH.x) / 2, y: (lH.y + rH.y) / 2 };
-  const dx = shoulderMid.x - hipMid.x;
-  const dy = shoulderMid.y - hipMid.y;
+  const sMid = { x: (lS.x+rS.x)/2, y: (lS.y+rS.y)/2 };
+  const hMid = { x: (lH.x+rH.x)/2, y: (lH.y+rH.y)/2 };
   return new THREE.Euler(
-    THREE.MathUtils.clamp(dy * 0.8, -0.3, 0.3),
-    THREE.MathUtils.clamp(dx * 0.8, -0.3, 0.3),
-    0,
-    'XYZ'
+    THREE.MathUtils.clamp((sMid.y - hMid.y) * 0.8, -0.3, 0.3),
+    THREE.MathUtils.clamp((sMid.x - hMid.x) * 0.8, -0.3, 0.3),
+    0, 'XYZ'
   );
 }
+
+// FIX 7: lerp factor exposed as a named constant so it can be tuned
+const LERP_POSE = 0.6;
+const LERP_HAND = 0.7;
 
 function applyBoneRotation(boneName, euler) {
   const bone = boneMap[boneName];
   if (!bone) return;
-  bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, euler.x, 0.6);
-  bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, euler.y, 0.6);
-  bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, euler.z, 0.6);
+  bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, euler.x, LERP_POSE);
+  bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, euler.y, LERP_POSE);
+  bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, euler.z, LERP_POSE);
 }
 
-// ── Hand → Bones ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Hand application
+// ─────────────────────────────────────────────────────────────────────────────
 function applyHand(handLandmarks, boneMapRef, side) {
   if (!handLandmarks || handLandmarks.length < 21) return;
   const sign = side === 'Left' ? -1 : 1;
 
   for (const [idx, boneName] of Object.entries(boneMapRef)) {
-    const i     = parseInt(idx);
-    const child = handLandmarks[i];
-    // Each bone points from its parent landmark to itself
-    const parentIdx = getParentIdx(i);
-    const parent    = handLandmarks[parentIdx];
+    const i      = parseInt(idx);
+    const child  = handLandmarks[i];
+    const parent = handLandmarks[getParentIdx(i)];
     if (!child || !parent) continue;
-
     const bone = boneMap[boneName];
     if (!bone) continue;
 
@@ -532,46 +544,59 @@ function applyHand(handLandmarks, boneMapRef, side) {
       -(child.y - parent.y),
       (child.z || 0) - (parent.z || 0)
     ).normalize();
-
-    const defaultDir = new THREE.Vector3(sign, 0, 0).normalize();
-    const q = new THREE.Quaternion().setFromUnitVectors(defaultDir, dir);
-    const rot = new THREE.Euler().setFromQuaternion(q, 'XYZ');
-
-    bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, rot.x, 0.7);
-    bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, rot.y, 0.7);
-    bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, rot.z, 0.7);
+    const def = new THREE.Vector3(sign, 0, 0).normalize();
+    const rot = new THREE.Euler().setFromQuaternion(
+      new THREE.Quaternion().setFromUnitVectors(def, dir), 'XYZ'
+    );
+    bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, rot.x, LERP_HAND);
+    bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, rot.y, LERP_HAND);
+    bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, rot.z, LERP_HAND);
   }
 
-  // Wrist rotation from wrist→middle_mcp direction
+  // Wrist bone from wrist→middle_mcp
   const wristBone = boneMap[side + 'Hand'];
   if (wristBone && handLandmarks[0] && handLandmarks[9]) {
     const w = handLandmarks[0], m = handLandmarks[9];
     const dir = new THREE.Vector3(
-      (m.x - w.x) * sign, -(m.y - w.y), (m.z || 0) - (w.z || 0)
+      (m.x - w.x) * sign, -(m.y - w.y), (m.z||0)-(w.z||0)
     ).normalize();
     const def = new THREE.Vector3(sign, 0, 0).normalize();
-    const q   = new THREE.Quaternion().setFromUnitVectors(def, dir);
-    const rot = new THREE.Euler().setFromQuaternion(q, 'XYZ');
-    wristBone.rotation.x = THREE.MathUtils.lerp(wristBone.rotation.x, rot.x, 0.7);
-    wristBone.rotation.y = THREE.MathUtils.lerp(wristBone.rotation.y, rot.y, 0.7);
-    wristBone.rotation.z = THREE.MathUtils.lerp(wristBone.rotation.z, rot.z, 0.7);
+    const rot = new THREE.Euler().setFromQuaternion(
+      new THREE.Quaternion().setFromUnitVectors(def, dir), 'XYZ'
+    );
+    wristBone.rotation.x = THREE.MathUtils.lerp(wristBone.rotation.x, rot.x, LERP_HAND);
+    wristBone.rotation.y = THREE.MathUtils.lerp(wristBone.rotation.y, rot.y, LERP_HAND);
+    wristBone.rotation.z = THREE.MathUtils.lerp(wristBone.rotation.z, rot.z, LERP_HAND);
   }
 }
 
-// MediaPipe hand parent indices
+function applyHandBlended(handsA, handsB, boneMapRef, side, alpha) {
+  if (!handsA || !handsB) { applyHand(handsA || handsB, boneMapRef, side); return; }
+  const blended = handsA.map((lmA, i) => {
+    const lmB = handsB[i];
+    if (!lmB) return lmA;
+    return {
+      x: lmA.x * alpha + lmB.x * (1-alpha),
+      y: lmA.y * alpha + lmB.y * (1-alpha),
+      z: (lmA.z||0)*alpha + (lmB.z||0)*(1-alpha),
+    };
+  });
+  applyHand(blended, boneMapRef, side);
+}
+
 function getParentIdx(i) {
   if (i === 0) return 0;
   const groups = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16],[17,18,19,20]];
   for (const g of groups) {
     const pos = g.indexOf(i);
-    if (pos === 0) return 0;           // MCP → wrist
-    if (pos > 0)  return g[pos - 1];  // PIP/DIP/TIP → previous
+    if (pos === 0) return 0;
+    if (pos > 0)  return g[pos-1];
   }
   return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Animation loop
+// Render / animation loop
 // ─────────────────────────────────────────────────────────────────────────────
 function animate(ts) {
   requestAnimationFrame(animate);
@@ -580,14 +605,15 @@ function animate(ts) {
   if (playing && motionData && !scrubbing) {
     const dt = ts - lastTime;
     frameTimer += dt * speed;
-    const frameDuration = 1000 / motionData.fps;
+    const frameDur = 1000 / motionData.fps;
 
-    while (frameTimer >= frameDuration) {
-      frameTimer -= frameDuration;
+    while (frameTimer >= frameDur) {
+      frameTimer -= frameDur;
       frameIdx++;
       if (frameIdx >= motionData.total_frames) {
         if (looping) {
           frameIdx = 0;
+          crossfadeAlpha = 0.0; // start blending from frame 0
         } else {
           frameIdx = motionData.total_frames - 1;
           playing  = false;
@@ -596,7 +622,13 @@ function animate(ts) {
         }
       }
     }
-    applyFrame(frameIdx);
+
+    // FIX 6 cont: ramp crossfadeAlpha back to 1.0 over CROSSFADE_FRAMES frames
+    if (crossfadeAlpha < 1.0) {
+      crossfadeAlpha = Math.min(1.0, crossfadeAlpha + (1.0 / CROSSFADE_FRAMES));
+    }
+
+    applyFrame(frameIdx, crossfadeAlpha);
     updateScrubber();
   }
 
@@ -607,17 +639,16 @@ function animate(ts) {
 function updateScrubber() {
   if (!motionData) return;
   document.getElementById('scrubber').value = frameIdx;
-  const t = frameIdx / motionData.fps;
-  document.getElementById('time-cur').textContent = t.toFixed(1) + 's';
+  document.getElementById('time-cur').textContent = (frameIdx / motionData.fps).toFixed(1) + 's';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UI wiring
+// UI helpers
 // ─────────────────────────────────────────────────────────────────────────────
-function setStatus(msg, cls) {
+function setStatus(msg, cls = '') {
   const el = document.getElementById('status');
-  el.textContent  = msg;
-  el.className    = cls;
+  el.textContent = msg;
+  el.className   = cls;
 }
 
 function tryEnablePlay() {
@@ -625,43 +656,17 @@ function tryEnablePlay() {
     document.getElementById('btn-play').disabled  = false;
     document.getElementById('btn-reset').disabled = false;
     document.getElementById('scrubber').disabled  = false;
-    applyFrame(0);
+    applyFrame(0, 1.0);
   }
 }
 
-// GLB file input
+// ─────────────────────────────────────────────────────────────────────────────
+// File inputs
+// ─────────────────────────────────────────────────────────────────────────────
 document.getElementById('glb-input').addEventListener('change', e => {
   const file = e.target.files[0];
-  if (!file) return;
-  loadGLB(URL.createObjectURL(file), file.name);
+  if (file) loadGLB(URL.createObjectURL(file), file.name);
 });
-
-// JSON file input
-function readJSONFile(file) {
-  setStatus(`⏳ Reading ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)…`, '');
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const data = JSON.parse(ev.target.result);
-        // Validate structure
-        if (!data.frames || !Array.isArray(data.frames)) {
-          reject('Missing "frames" array in JSON');
-          return;
-        }
-        if (!data.fps || !data.total_frames) {
-          reject('Missing fps or total_frames in JSON');
-          return;
-        }
-        resolve(data);
-      } catch(err) {
-        reject('JSON parse error: ' + err.message);
-      }
-    };
-    reader.onerror = () => reject('File read error');
-    reader.readAsText(file);
-  });
-}
 
 document.getElementById('json-input').addEventListener('change', async e => {
   const file = e.target.files[0];
@@ -669,32 +674,35 @@ document.getElementById('json-input').addEventListener('change', async e => {
   try {
     const data = await readJSONFile(file);
     loadMotionJSON(data, file.name);
-  } catch(err) {
+  } catch (err) {
     setStatus('❌ ' + err, 'err');
-    console.error(err);
+    console.error('Motion JSON error:', err);
   }
 });
 
-// Drag & drop anywhere
+// FIX 1 cont: case-insensitive extension in drag-drop handler
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', async e => {
   e.preventDefault();
   for (const file of e.dataTransfer.files) {
-    if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) {
+    const name = file.name.toLowerCase();
+    if (name.endsWith('.glb') || name.endsWith('.gltf')) {
       loadGLB(URL.createObjectURL(file), file.name);
-    } else if (file.name.endsWith('.json')) {
+    } else if (name.endsWith('.json')) {
       try {
         const data = await readJSONFile(file);
         loadMotionJSON(data, file.name);
-      } catch(err) {
+      } catch (err) {
         setStatus('❌ ' + err, 'err');
-        console.error(err);
+        console.error('Motion JSON error:', err);
       }
+    } else {
+      setStatus(`❌ Unsupported file type: "${file.name}". Drop a .glb or .json file.`, 'err');
     }
   }
 });
 
-// Play / Pause / Reset
+// Playback controls
 document.getElementById('btn-play').addEventListener('click', () => {
   playing = true;
   document.getElementById('btn-play').disabled  = true;
@@ -706,25 +714,28 @@ document.getElementById('btn-pause').addEventListener('click', () => {
   document.getElementById('btn-pause').disabled = true;
 });
 document.getElementById('btn-reset').addEventListener('click', () => {
-  frameIdx = 0; frameTimer = 0;
+  frameIdx = 0; frameTimer = 0; crossfadeAlpha = 1.0;
   playing  = false;
   document.getElementById('btn-play').disabled  = false;
   document.getElementById('btn-pause').disabled = true;
-  applyFrame(0);
+  applyFrame(0, 1.0);
   updateScrubber();
 });
 
 // Scrubber
 const scrubEl = document.getElementById('scrubber');
-scrubEl.addEventListener('mousedown',  () => { scrubbing = true; });
-scrubEl.addEventListener('touchstart', () => { scrubbing = true; });
+function onScrubStart() { scrubbing = true; }
+function onScrubEnd()   { scrubbing = false; }
+scrubEl.addEventListener('mousedown',  onScrubStart);
+scrubEl.addEventListener('touchstart', onScrubStart, { passive: true });
+scrubEl.addEventListener('mouseup',    onScrubEnd);
+scrubEl.addEventListener('touchend',   onScrubEnd);
 scrubEl.addEventListener('input', () => {
   frameIdx = parseInt(scrubEl.value);
-  applyFrame(frameIdx);
+  crossfadeAlpha = 1.0;
+  applyFrame(frameIdx, 1.0);
   updateScrubber();
 });
-scrubEl.addEventListener('mouseup',  () => { scrubbing = false; });
-scrubEl.addEventListener('touchend', () => { scrubbing = false; });
 
 // Speed buttons
 document.querySelectorAll('.speed-btn').forEach(btn => {
@@ -752,10 +763,8 @@ document.getElementById('toggle-loop').addEventListener('change', e => {
   looping = e.target.checked;
 });
 
-// Hide overlay once Three.js is ready
+// Ready
 document.getElementById('overlay').style.display = 'none';
-
-// Kick off render loop
 requestAnimationFrame(animate);
 </script>
 </body>

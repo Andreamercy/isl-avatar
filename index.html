@@ -176,41 +176,36 @@ import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants
+// Pose landmark indices
 // ─────────────────────────────────────────────────────────────────────────────
 const POSE_IDX = {
   NOSE: 0,
-  LEFT_SHOULDER: 11, RIGHT_SHOULDER: 12,
-  LEFT_ELBOW:    13, RIGHT_ELBOW:    14,
-  LEFT_WRIST:    15, RIGHT_WRIST:    16,
-  LEFT_HIP:      23, RIGHT_HIP:      24,
+  LEFT_SHOULDER:  11, RIGHT_SHOULDER: 12,
+  LEFT_ELBOW:     13, RIGHT_ELBOW:    14,
+  LEFT_WRIST:     15, RIGHT_WRIST:    16,
+  LEFT_HIP:       23, RIGHT_HIP:      24,
 };
 
-// Finger chains: mcp = knuckle landmark index, joints = [pip, dip, tip] indices
-// bones = bone name suffixes (appended to "LeftHand" / "RightHand")
-const HAND_FINGER_CHAINS = {
-  Thumb:  { mcp: 1, joints: [2, 3, 4],   bones: ['Thumb2','Thumb3','Thumb4']   },
-  Index:  { mcp: 5, joints: [6, 7, 8],   bones: ['Index2','Index3','Index4']   },
-  Middle: { mcp: 9, joints: [10,11,12],  bones: ['Middle2','Middle3','Middle4'] },
-  Ring:   { mcp:13, joints: [14,15,16],  bones: ['Ring2','Ring3','Ring4']       },
-  Pinky:  { mcp:17, joints: [18,19,20],  bones: ['Pinky2','Pinky3','Pinky4']   },
+// ─────────────────────────────────────────────────────────────────────────────
+// Finger definitions
+// Each finger: landmark index for [MCP, PIP, DIP, TIP]
+// Bone name suffixes for [MCP-bone, PIP-bone, DIP-bone, TIP-bone]
+// ─────────────────────────────────────────────────────────────────────────────
+const FINGERS = {
+  Thumb:  { lm: [1,  2,  3,  4],  bones: ['Thumb1', 'Thumb2', 'Thumb3', 'Thumb4']  },
+  Index:  { lm: [5,  6,  7,  8],  bones: ['Index1', 'Index2', 'Index3', 'Index4']  },
+  Middle: { lm: [9,  10, 11, 12], bones: ['Middle1','Middle2','Middle3','Middle4'] },
+  Ring:   { lm: [13, 14, 15, 16], bones: ['Ring1',  'Ring2',  'Ring3',  'Ring4']   },
+  Pinky:  { lm: [17, 18, 19, 20], bones: ['Pinky1', 'Pinky2', 'Pinky3', 'Pinky4'] },
 };
 
-// MCP (knuckle) bones — bone name suffixes
-const MCP_BONES = {
-  Thumb:  'Thumb1',
-  Index:  'Index1',
-  Middle: 'Middle1',
-  Ring:   'Ring1',
-  Pinky:  'Pinky1',
-};
-
+// Lerp factors
 const LERP_ARM  = 0.5;
-const LERP_HAND = 0.55;
+const LERP_HAND = 0.6;
 const CROSSFADE_FRAMES = 6;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scene setup
+// Scene
 // ─────────────────────────────────────────────────────────────────────────────
 const container = document.getElementById('canvas-container');
 const renderer  = new THREE.WebGLRenderer({ antialias: true });
@@ -267,8 +262,7 @@ window.addEventListener('resize', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 let avatar         = null;
 let boneMap        = {};
-let restQuatMap    = {};   // bone rest quaternions (bind pose)
-let boneForwardMap = {};   // detected local rest-forward axis per bone (+X or +Y)
+let restRotMap     = {};   // rest Euler per bone (bind pose)
 let motionData     = null;
 let skeletonHelper = null;
 
@@ -286,7 +280,7 @@ let crossfadeAlpha = 1.0;
 // ─────────────────────────────────────────────────────────────────────────────
 function loadGLB(url, name) {
   setStatus('Loading avatar…', 'info');
-  if (avatar)         { scene.remove(avatar); boneMap = {}; restQuatMap = {}; boneForwardMap = {}; }
+  if (avatar)         { scene.remove(avatar); boneMap = {}; restRotMap = {}; }
   if (skeletonHelper) { scene.remove(skeletonHelper); skeletonHelper = null; }
 
   new GLTFLoader().load(url, gltf => {
@@ -303,13 +297,10 @@ function loadGLB(url, name) {
         obj.skeleton.bones.forEach(b => { boneMap[b.name] = b; });
     });
 
-    // Store rest quaternions and auto-detect each finger bone's local forward axis.
-    // Finger bones in RPM/Mixamo rigs point along +Y in local space,
-    // whereas some rigs use +X. We detect this by checking which child
-    // lies further along +X vs +Y in the bone's local frame.
+    // Capture the rest/bind Euler for every bone so we can
+    // apply finger rotations as deltas on top of the rest pose.
     for (const [bName, bone] of Object.entries(boneMap)) {
-      restQuatMap[bName] = bone.quaternion.clone();
-      boneForwardMap[bName] = detectBoneForwardAxis(bone);
+      restRotMap[bName] = bone.rotation.clone();
     }
 
     scene.add(avatar);
@@ -318,83 +309,44 @@ function loadGLB(url, name) {
 
     document.getElementById('glb-name').textContent = name;
     setStatus(`✅ Avatar loaded — ${Object.keys(boneMap).length} bones`, 'ok');
-    console.log('Bones:', Object.keys(boneMap).sort());
+    console.log('Bones found:', Object.keys(boneMap).sort().join(', '));
     tryEnablePlay();
   }, undefined, err => {
     setStatus(`❌ Failed to load GLB: ${err.message}`, 'err');
   });
 }
 
-/**
- * Auto-detect whether a bone's rest-pose forward axis is +X or +Y (local space).
- *
- * Strategy: look at the first child bone position in this bone's local space.
- * Whichever local axis the child sits further along is the forward axis.
- * Falls back to +Y (most common in RPM/Mixamo-style finger bones).
- */
-function detectBoneForwardAxis(bone) {
-  const child = bone.children.find(c => c.isBone || c.type === 'Bone');
-  if (!child) return new THREE.Vector3(0, 1, 0); // leaf bone — assume +Y
-
-  // child.position is already in bone-local space
-  const localPos = child.position.clone();
-  if (localPos.lengthSq() < 1e-10) return new THREE.Vector3(0, 1, 0);
-
-  const absX = Math.abs(localPos.x);
-  const absY = Math.abs(localPos.y);
-  const absZ = Math.abs(localPos.z);
-  const max  = Math.max(absX, absY, absZ);
-
-  if (max === absX) return new THREE.Vector3(Math.sign(localPos.x), 0, 0);
-  if (max === absY) return new THREE.Vector3(0, Math.sign(localPos.y), 0);
-  return new THREE.Vector3(0, 0, Math.sign(localPos.z));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON loading & validation
+// JSON loading
 // ─────────────────────────────────────────────────────────────────────────────
 function readJSONFile(file) {
   if (!file.name.toLowerCase().endsWith('.json'))
     return Promise.reject(`Expected a .json file, got "${file.name}"`);
-
   setStatus(`Reading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`, 'info');
-
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = ev => {
       let data;
       try { data = JSON.parse(ev.target.result); }
-      catch (err) { reject(`JSON syntax error: ${err.message}`); return; }
-
-      if (!data.frames || !Array.isArray(data.frames))
-        { reject('Invalid file: missing "frames" array. Was this generated by extract_motion.py?'); return; }
-      if (data.frames.length === 0)
-        { reject('Invalid file: "frames" array is empty.'); return; }
-      if (typeof data.fps !== 'number' || data.fps <= 0)
-        { reject('Invalid file: "fps" must be a positive number.'); return; }
-      if (typeof data.total_frames !== 'number' || data.total_frames <= 0)
-        { reject('Invalid file: "total_frames" must be a positive number.'); return; }
-
+      catch (e) { reject(`JSON syntax error: ${e.message}`); return; }
+      if (!data.frames || !Array.isArray(data.frames)) { reject('Missing "frames" array'); return; }
+      if (data.frames.length === 0)                     { reject('"frames" is empty'); return; }
+      if (typeof data.fps !== 'number' || data.fps <= 0){ reject('"fps" must be a positive number'); return; }
+      if (typeof data.total_frames !== 'number')        { reject('"total_frames" missing'); return; }
       resolve(data);
     };
-    reader.onerror = () => reject('File read error — the file may be corrupted.');
+    reader.onerror = () => reject('File read error');
     reader.readAsText(file);
   });
 }
 
 function loadMotionJSON(data, name) {
-  motionData     = data;
-  frameIdx       = 0;
-  frameTimer     = 0;
-  crossfadeAlpha = 1.0;
-
+  motionData = data; frameIdx = 0; frameTimer = 0; crossfadeAlpha = 1.0;
   document.getElementById('json-name').textContent = name;
-
-  const dur     = data.total_frames / data.fps;
-  const lmCount = (data.frames[0]?.pose?.length      || 0)
-                + (data.frames[0]?.left_hand?.length  || 0)
+  const dur = data.total_frames / data.fps;
+  const lmCount = (data.frames[0]?.pose?.length || 0)
+                + (data.frames[0]?.left_hand?.length || 0)
                 + (data.frames[0]?.right_hand?.length || 0);
-
   document.getElementById('stat-frames').textContent = data.total_frames;
   document.getElementById('stat-fps').textContent    = data.fps.toFixed(1);
   document.getElementById('stat-dur').textContent    = dur.toFixed(2) + 's';
@@ -402,25 +354,23 @@ function loadMotionJSON(data, name) {
   document.getElementById('scrubber').max            = data.total_frames - 1;
   document.getElementById('scrubber').value          = 0;
   document.getElementById('time-tot').textContent    = dur.toFixed(1) + 's';
-
   const wordLabel = data.word ?? name.replace(/\.json$/i, '').toUpperCase();
   setStatus(`✅ Motion loaded — "${wordLabel}"  ${data.total_frames} frames @ ${data.fps.toFixed(0)} fps`, 'ok');
   tryEnablePlay();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// applyFrame — dispatch with optional crossfade blend
+// Frame application
 // ─────────────────────────────────────────────────────────────────────────────
 function applyFrame(idx, alpha) {
   if (!avatar || !motionData) return;
   const frameA = motionData.frames[idx];
   if (!frameA) return;
-
   if (alpha !== undefined && alpha < 1.0 && looping) {
     const frameB = motionData.frames[0];
-    applyPose(lerpLandmarks(frameA.pose,       frameB.pose,       alpha));
-    applyHand(lerpLandmarks(frameA.left_hand,  frameB.left_hand,  alpha), 'Left');
-    applyHand(lerpLandmarks(frameA.right_hand, frameB.right_hand, alpha), 'Right');
+    applyPose(lerpLandmarks(frameA.pose,      frameB.pose,      alpha));
+    applyHand(lerpLandmarks(frameA.left_hand, frameB.left_hand, alpha), 'Left');
+    applyHand(lerpLandmarks(frameA.right_hand,frameB.right_hand,alpha), 'Right');
   } else {
     applyPose(frameA.pose);
     applyHand(frameA.left_hand,  'Left');
@@ -430,297 +380,273 @@ function applyFrame(idx, alpha) {
 
 function lerpLandmarks(a, b, t) {
   if (!a || !b) return a || b;
-  return a.map((lmA, i) => {
-    const lmB = b[i];
-    if (!lmB) return lmA;
-    return {
-      x: lmA.x * t + lmB.x * (1 - t),
-      y: lmA.y * t + lmB.y * (1 - t),
-      z: (lmA.z || 0) * t + (lmB.z || 0) * (1 - t),
-    };
+  return a.map((lA, i) => {
+    const lB = b[i]; if (!lB) return lA;
+    return { x: lA.x*t+lB.x*(1-t), y: lA.y*t+lB.y*(1-t), z: (lA.z||0)*t+(lB.z||0)*(1-t) };
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POSE — arm, spine, head
+// POSE — arms, spine, head
 // ─────────────────────────────────────────────────────────────────────────────
 function applyPose(pose) {
   if (!pose || pose.length < 25) return;
+  const lS=pose[11],rS=pose[12],lE=pose[13],rE=pose[14],lW=pose[15],rW=pose[16];
+  const lH=pose[23],rH=pose[24],nose=pose[0];
 
-  const lS   = pose[POSE_IDX.LEFT_SHOULDER];
-  const rS   = pose[POSE_IDX.RIGHT_SHOULDER];
-  const lE   = pose[POSE_IDX.LEFT_ELBOW];
-  const rE   = pose[POSE_IDX.RIGHT_ELBOW];
-  const lW   = pose[POSE_IDX.LEFT_WRIST];
-  const rW   = pose[POSE_IDX.RIGHT_WRIST];
-  const lH   = pose[POSE_IDX.LEFT_HIP];
-  const rH   = pose[POSE_IDX.RIGHT_HIP];
-  const nose = pose[POSE_IDX.NOSE];
+  if (lS&&lE) smoothBone('LeftArm',      computeLimbEuler(lS,lE,-1), LERP_ARM);
+  if (lE&&lW) smoothBone('LeftForeArm',  computeLimbEuler(lE,lW,-1), LERP_ARM);
+  if (rS&&rE) smoothBone('RightArm',     computeLimbEuler(rS,rE, 1), LERP_ARM);
+  if (rE&&rW) smoothBone('RightForeArm', computeLimbEuler(rE,rW, 1), LERP_ARM);
 
-  if (lS && lE) smoothBone('LeftArm',     computeLimbEuler(lS, lE, -1), LERP_ARM);
-  if (lE && lW) smoothBone('LeftForeArm', computeLimbEuler(lE, lW, -1), LERP_ARM);
-  if (rS && rE) smoothBone('RightArm',    computeLimbEuler(rS, rE,  1), LERP_ARM);
-  if (rE && rW) smoothBone('RightForeArm',computeLimbEuler(rE, rW,  1), LERP_ARM);
-
-  if (lS && rS && lH && rH) {
-    const t = computeSpineTilt(lS, rS, lH, rH);
-    smoothBone('Spine',  new THREE.Euler(t.x * 0.3, t.y * 0.3, 0));
-    smoothBone('Spine1', new THREE.Euler(t.x * 0.4, t.y * 0.4, 0));
-    smoothBone('Spine2', new THREE.Euler(t.x * 0.3, t.y * 0.3, 0));
+  if (lS&&rS&&lH&&rH) {
+    const sm={x:(lS.x+rS.x)/2,y:(lS.y+rS.y)/2}, hm={x:(lH.x+rH.x)/2,y:(lH.y+rH.y)/2};
+    const tx=THREE.MathUtils.clamp((sm.y-hm.y)*0.8,-0.3,0.3);
+    const ty=THREE.MathUtils.clamp((sm.x-hm.x)*0.8,-0.3,0.3);
+    smoothBone('Spine',  new THREE.Euler(tx*0.3,ty*0.3,0));
+    smoothBone('Spine1', new THREE.Euler(tx*0.4,ty*0.4,0));
+    smoothBone('Spine2', new THREE.Euler(tx*0.3,ty*0.3,0));
   }
-
-  if (nose && lS && rS && boneMap['Head']) {
-    const nx = (lS.x + rS.x) / 2, ny = (lS.y + rS.y) / 2;
-    const headRot = new THREE.Euler(
-      THREE.MathUtils.clamp(-(nose.y - ny) * 1.2 * Math.PI, -0.4, 0.4),
-      THREE.MathUtils.clamp( (nose.x - nx) * 1.5 * Math.PI, -0.5, 0.5),
-      0, 'XYZ'
-    );
-    boneMap['Head'].rotation.copy(headRot);
-    if (boneMap['Neck']) boneMap['Neck'].rotation.set(headRot.x * 0.4, headRot.y * 0.3, 0);
+  if (nose&&lS&&rS&&boneMap['Head']) {
+    const nx=(lS.x+rS.x)/2, ny=(lS.y+rS.y)/2;
+    const hx=THREE.MathUtils.clamp(-(nose.y-ny)*1.2*Math.PI,-0.4,0.4);
+    const hy=THREE.MathUtils.clamp( (nose.x-nx)*1.5*Math.PI,-0.5,0.5);
+    boneMap['Head'].rotation.set(hx,hy,0);
+    if (boneMap['Neck']) boneMap['Neck'].rotation.set(hx*0.4,hy*0.3,0);
   }
 }
 
 function computeLimbEuler(from, to, side) {
-  const dir = new THREE.Vector3(
-    (to.x - from.x) * side,
-    -(to.y - from.y),
-    (to.z || 0) - (from.z || 0)
-  ).normalize();
-  const def = new THREE.Vector3(side, -1, 0).normalize();
-  return new THREE.Euler().setFromQuaternion(
-    new THREE.Quaternion().setFromUnitVectors(def, dir), 'XYZ'
-  );
-}
-
-function computeSpineTilt(lS, rS, lH, rH) {
-  const sm = { x: (lS.x + rS.x) / 2, y: (lS.y + rS.y) / 2 };
-  const hm = { x: (lH.x + rH.x) / 2, y: (lH.y + rH.y) / 2 };
-  return new THREE.Euler(
-    THREE.MathUtils.clamp((sm.y - hm.y) * 0.8, -0.3, 0.3),
-    THREE.MathUtils.clamp((sm.x - hm.x) * 0.8, -0.3, 0.3),
-    0, 'XYZ'
-  );
+  const dir = new THREE.Vector3((to.x-from.x)*side,-(to.y-from.y),(to.z||0)-(from.z||0)).normalize();
+  const def = new THREE.Vector3(side,-1,0).normalize();
+  return new THREE.Euler().setFromQuaternion(new THREE.Quaternion().setFromUnitVectors(def,dir),'XYZ');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HAND retargeting — landmark-space → bone-local-space mapping
+// HAND retargeting — angle-based curl + splay
 //
-// MediaPipe hand landmarks are in normalised image/camera space:
-//   X: right is positive (mirrored for the person's right hand in selfie mode)
-//   Y: down is positive
-//   Z: depth (smaller = closer to camera)
+// Approach (same as Kalidokit / Mediapipe-to-VRM):
 //
-// We build a palm coordinate frame from the wrist + knuckle row, then for
-// each finger segment we:
-//   1. Compute the segment direction in camera space
-//   2. Remove the gross hand orientation by expressing it in palm space
-//   3. Compute the rotation from the bone's local rest-forward axis to that
-//      palm-space direction and apply it on top of the rest quaternion
+//  1. Build a palm coordinate frame (wrist origin, fingers-forward = +Y,
+//     thumb-side = +X for right hand / -X for left hand, dorsal = +Z).
 //
-// Chirality note:
-//   MediaPipe VIDEO mode returns hand landmarks as seen in the raw (un-mirrored)
-//   frame.  "Left" from MediaPipe's perspective is the person's RIGHT hand.
-//   We handle this by:
-//     - Using sx = -1 for the person's Left hand, sx = +1 for Right
-//     - Flipping Y (screen-down → world-up)
-//     - NOT flipping Z (depth is consistent for both hands)
+//  2. For EACH finger joint, compute the BEND ANGLE between the two adjacent
+//     bone segments using the dot product.  That angle maps directly to a
+//     local X-rotation (curl) on the bone.
+//
+//  3. For the MCP bone only, compute the SPLAY angle (deviation of the finger
+//     from the palm center-line in the palm plane) and apply it as a local
+//     Z-rotation (abduction/adduction).
+//
+//  4. The thumb gets special treatment because it opposes rather than curls
+//     like the other fingers.
+//
+// Why angles, not quaternion direction-matching?
+//   Finger bones in RPM/Mixamo rigs have a well-defined local-space convention:
+//     • Curl  = rotation around local X axis
+//     • Splay = rotation around local Z axis
+//   Applying angles directly in bone-local space is robust regardless of which
+//   global axis the bone happens to be pointing, and avoids all the frame-
+//   construction complexity that was failing before.
 // ─────────────────────────────────────────────────────────────────────────────
 function applyHand(landmarks, side) {
   if (!landmarks || landmarks.length < 21) return;
 
   const isLeft = side === 'Left';
-  const prefix = side;          // 'Left' or 'Right'
-  // MediaPipe VIDEO mode: sx=-1 flips the mirrored X back to world-space right
+  const prefix = side;
+  // sx mirrors MediaPipe X back to anatomical space:
+  // MediaPipe video mode: screen-right is +X for BOTH hands (raw frame coords).
+  // Person's LEFT hand is on their left → screen-left → needs sx=-1 to flip.
   const sx = isLeft ? -1 : 1;
 
-  // ── Step 1: Palm coordinate frame ────────────────────────────────────────
-  // Landmark indices:
-  //   0  = wrist
-  //   5  = index MCP (knuckle)
-  //   9  = middle MCP
-  //   13 = ring MCP
-  //   17 = pinky MCP
-  const w   = lm(landmarks, 0);
-  const i5  = lm(landmarks, 5);
-  const m9  = lm(landmarks, 9);
-  const p17 = lm(landmarks, 17);
+  // Convert a MediaPipe landmark to a consistent right-handed world vector
+  // (Y-up, X-right from the subject's perspective)
+  const v = (idx) => {
+    const l = landmarks[idx];
+    if (!l) return null;
+    if (l.x === 0 && l.y === 0 && (!l.z || l.z === 0)) return null;
+    return new THREE.Vector3(l.x * sx, -l.y, l.z || 0);
+  };
 
-  if (!w || !i5 || !m9) return;
+  // Wrist and key knuckles
+  const W  = v(0);
+  const I5 = v(5);   // index MCP
+  const M9 = v(9);   // middle MCP
+  const R13= v(13);  // ring MCP
+  const P17= v(17);  // pinky MCP
+  if (!W || !I5 || !M9) return;
 
-  // Convert to right-handed world-like space: flip Y, mirror X for left hand
-  const toWorld = (l) => new THREE.Vector3(l.x * sx, -l.y, l.z || 0);
+  // ── Palm coordinate frame ────────────────────────────────────────────────
+  // palmY: wrist → middle knuckle (finger direction)
+  const palmY = M9.clone().sub(W).normalize();
 
-  const wW   = toWorld(w);
-  const i5W  = toWorld(i5);
-  const m9W  = toWorld(m9);
-  const p17W = p17 ? toWorld(p17) : null;
+  // palmX: across knuckles (index → pinky direction, = splay axis)
+  const palmX = P17
+    ? P17.clone().sub(I5).normalize()
+    : new THREE.Vector3(sx > 0 ? -1 : 1, 0, 0);
 
-  // Palm forward: wrist → middle MCP
-  const palmFwd = m9W.clone().sub(wW);
-  if (palmFwd.lengthSq() < 1e-8) return;
-  palmFwd.normalize();
+  // palmZ: dorsal normal (back of hand)
+  const palmZ = new THREE.Vector3().crossVectors(palmX, palmY).normalize();
 
-  // Palm side: index MCP → pinky MCP (points toward pinky)
-  // For left hand this naturally points leftward, for right hand rightward.
-  const palmSide = p17W
-    ? p17W.clone().sub(i5W).normalize()
-    : new THREE.Vector3(isLeft ? -1 : 1, 0, 0);
+  // Re-orthogonalise palmX
+  palmX.crossVectors(palmY, palmZ).normalize();
 
-  // Palm up (dorsal direction): perpendicular to both
-  // Use cross(palmFwd, palmSide) — order matters for consistent normal direction
-  const palmUp = new THREE.Vector3().crossVectors(palmFwd, palmSide);
-  if (palmUp.lengthSq() < 1e-8) return;
-  palmUp.normalize();
-
-  // Re-orthogonalise side axis
-  const palmSideOrtho = new THREE.Vector3().crossVectors(palmUp, palmFwd).normalize();
-
-  // Build rotation matrix: columns = [palmSideOrtho, palmUp, palmFwd]
-  // This maps local palm axes → world axes
-  const palmMat  = new THREE.Matrix4().makeBasis(palmSideOrtho, palmUp, palmFwd);
+  // ── Wrist bone: match palm orientation to arm ─────────────────────────────
+  // palmY points along fingers, palmX is lateral, palmZ is dorsal.
+  // Build a quaternion that takes the model from its rest wrist orientation
+  // to the observed palm orientation.
+  const palmMat  = new THREE.Matrix4().makeBasis(palmX, palmY, palmZ);
   const palmQuat = new THREE.Quaternion().setFromRotationMatrix(palmMat);
 
-  // ── Step 2: Wrist bone rotation ──────────────────────────────────────────
-  // The wrist bone (LeftHand / RightHand) should orient to match the palm.
-  // We compute its desired local quaternion = inv(parentWorld) * palmQuat.
-  const wristBoneName = prefix + 'Hand';
-  const wristBone     = boneMap[wristBoneName];
+  const wristBone = boneMap[prefix + 'Hand'];
   if (wristBone) {
-    const parentWorldQuat = new THREE.Quaternion();
-    if (wristBone.parent) wristBone.parent.getWorldQuaternion(parentWorldQuat);
-
-    // Desired local quaternion for the wrist bone
-    const targetLocalQuat = palmQuat.clone().premultiply(parentWorldQuat.clone().invert());
-
-    // Slerp toward target, preserving smoothness
-    wristBone.quaternion.slerp(targetLocalQuat, LERP_HAND);
+    const pWorldQ = new THREE.Quaternion();
+    if (wristBone.parent) wristBone.parent.getWorldQuaternion(pWorldQ);
+    const targetLocal = palmQuat.clone().premultiply(pWorldQ.clone().invert());
+    wristBone.quaternion.slerp(targetLocal, LERP_HAND);
   }
 
-  // ── Step 3: Finger bone rotations ────────────────────────────────────────
-  // We work entirely in palm space to remove the gross wrist orientation.
-  const palmQuatInv = palmQuat.clone().invert();
+  // ── Finger bones: angle-based curl + splay ───────────────────────────────
+  for (const [fingerName, finger] of Object.entries(FINGERS)) {
+    const lmIdx = finger.lm;   // [MCP, PIP, DIP, TIP] landmark indices
+    const bones = finger.bones; // [MCP-bone, PIP-bone, DIP-bone, TIP-bone] suffixes
 
-  for (const [fingerName, chain] of Object.entries(HAND_FINGER_CHAINS)) {
-    const mcpBoneName = prefix + 'Hand' + MCP_BONES[fingerName];
-    const mcpLmIdx    = chain.mcp;
+    // Gather landmark positions (in world space)
+    const pts = lmIdx.map(i => v(i));
+    if (!pts[0] || !pts[1]) continue;
 
-    // MCP bone: direction from wrist to this knuckle in palm space
-    const mcpLmRaw = lm(landmarks, mcpLmIdx);
-    if (mcpLmRaw) {
-      const mcpW  = toWorld(mcpLmRaw);
-      const segDir = mcpW.clone().sub(wW).normalize();
-      applyFingerBone(mcpBoneName, segDir, palmQuatInv, LERP_HAND);
+    // ── Splay (MCP bone only) ────────────────────────────────────────────
+    // Measure how far the knuckle deviates left/right from the palm center-line.
+    // palmY is the center-line; project (wrist→MCP) onto the palm plane and
+    // measure its angle from palmY around palmZ.
+    const mcpDir = pts[0].clone().sub(W).normalize();
+    // Splay angle = angle in the palmX direction
+    const splayAngle = Math.asin(
+      THREE.MathUtils.clamp(mcpDir.dot(palmX), -1, 1)
+    );
+    // For the thumb, splay differently (thumb abducts in Z)
+    const mcpBoneName = prefix + 'Hand' + bones[0];
+    const mcpBone = boneMap[mcpBoneName];
+    if (mcpBone) {
+      const rest = restRotMap[mcpBoneName] || new THREE.Euler();
+      if (fingerName === 'Thumb') {
+        // Thumb MCP: use splay as Y rotation (opposition)
+        mcpBone.rotation.set(
+          lerp1(mcpBone.rotation.x, rest.x, LERP_HAND),
+          lerp1(mcpBone.rotation.y, rest.y + splayAngle * 0.6, LERP_HAND),
+          lerp1(mcpBone.rotation.z, rest.z, LERP_HAND)
+        );
+      } else {
+        // Other fingers: splay as Z (abduction)
+        // Curl angle from wrist→MCP vs palmY
+        const curl0 = angleBetween(palmY, mcpDir);
+        mcpBone.rotation.set(
+          lerp1(mcpBone.rotation.x, rest.x + curl0 * 0.4, LERP_HAND),
+          lerp1(mcpBone.rotation.y, rest.y, LERP_HAND),
+          lerp1(mcpBone.rotation.z, rest.z - splayAngle, LERP_HAND)
+        );
+      }
     }
 
-    // PIP / DIP / TIP bones: direction from parent to child landmark
-    for (let j = 0; j < chain.joints.length; j++) {
-      const boneName  = prefix + 'Hand' + chain.bones[j];
-      const childIdx  = chain.joints[j];
-      const parentIdx = j === 0 ? mcpLmIdx : chain.joints[j - 1];
+    // ── Curl (PIP, DIP bones — indices 1 and 2 in bones[]) ──────────────
+    // For each intermediate joint, measure the bend angle between the incoming
+    // and outgoing segment vectors, then apply as local X rotation.
+    for (let j = 0; j < 2; j++) {
+      if (!pts[j] || !pts[j+1] || !pts[j+2]) continue;
+      const boneName = prefix + 'Hand' + bones[j + 1];
+      const bone     = boneMap[boneName];
+      if (!bone) continue;
 
-      const childLmRaw  = lm(landmarks, childIdx);
-      const parentLmRaw = lm(landmarks, parentIdx);
-      if (!childLmRaw || !parentLmRaw) continue;
+      // Incoming segment: pts[j] → pts[j+1]
+      const segIn  = pts[j+1].clone().sub(pts[j]).normalize();
+      // Outgoing segment: pts[j+1] → pts[j+2]
+      const segOut = pts[j+2].clone().sub(pts[j+1]).normalize();
 
-      const childW  = toWorld(childLmRaw);
-      const parentW = toWorld(parentLmRaw);
-      const segDir  = childW.clone().sub(parentW).normalize();
+      // Bend angle (always ≥ 0; fingers only curl, they don't hyper-extend
+      // significantly, so we clamp to [0, π*0.9])
+      let curlAngle = angleBetween(segIn, segOut);
+      curlAngle = THREE.MathUtils.clamp(curlAngle, 0, Math.PI * 0.85);
 
-      applyFingerBone(boneName, segDir, palmQuatInv, LERP_HAND);
+      // For the thumb the curl axis is slightly different — use as-is
+      const rest = restRotMap[boneName] || new THREE.Euler();
+      if (fingerName === 'Thumb') {
+        bone.rotation.set(
+          lerp1(bone.rotation.x, rest.x + curlAngle * 0.7, LERP_HAND),
+          lerp1(bone.rotation.y, rest.y, LERP_HAND),
+          lerp1(bone.rotation.z, rest.z, LERP_HAND)
+        );
+      } else {
+        bone.rotation.set(
+          lerp1(bone.rotation.x, rest.x + curlAngle, LERP_HAND),
+          lerp1(bone.rotation.y, rest.y, LERP_HAND),
+          lerp1(bone.rotation.z, rest.z, LERP_HAND)
+        );
+      }
+    }
+
+    // ── TIP bone (index 3) — copy DIP curl, no splay ────────────────────
+    if (pts[2] && pts[3]) {
+      const tipBoneName = prefix + 'Hand' + bones[3];
+      const tipBone = boneMap[tipBoneName];
+      if (tipBone) {
+        const segIn  = pts[3].clone().sub(pts[2]).normalize();
+        const segRef = pts[2].clone().sub(pts[1] || pts[2]).normalize();
+        let curlAngle = pts[1] ? angleBetween(segRef, segIn) : 0;
+        curlAngle = THREE.MathUtils.clamp(curlAngle, 0, Math.PI * 0.7);
+        const rest = restRotMap[tipBoneName] || new THREE.Euler();
+        tipBone.rotation.set(
+          lerp1(tipBone.rotation.x, rest.x + curlAngle * (fingerName === 'Thumb' ? 0.5 : 0.8), LERP_HAND),
+          lerp1(tipBone.rotation.y, rest.y, LERP_HAND),
+          lerp1(tipBone.rotation.z, rest.z, LERP_HAND)
+        );
+      }
     }
   }
-}
-
-/**
- * Rotate a finger bone so it points along `segDirWorld`.
- *
- * Algorithm:
- *   1. Transform segDirWorld into palm-local space (removes hand orientation).
- *   2. The bone's rest-forward axis is fetched from boneForwardMap (auto-detected).
- *   3. Compute the minimal quaternion rotation from restFwd → dirInPalm.
- *   4. The final bone quaternion = restQuat * deltaQuat
- *      (restQuat keeps the bind-pose offset; deltaQuat adds the finger pose).
- *   5. Slerp the bone's current quaternion toward the final target.
- *
- * @param {string}           boneName    GLB bone name
- * @param {THREE.Vector3}    segDirWorld segment direction in world/camera space
- * @param {THREE.Quaternion} palmQuatInv inverse palm-frame quaternion
- * @param {number}           lerpT       smoothing factor 0–1
- */
-function applyFingerBone(boneName, segDirWorld, palmQuatInv, lerpT) {
-  const bone = boneMap[boneName];
-  if (!bone) return;
-
-  // Express the segment direction in palm space
-  const dirInPalm = segDirWorld.clone().applyQuaternion(palmQuatInv);
-  if (dirInPalm.lengthSq() < 1e-8) return;
-  dirInPalm.normalize();
-
-  // The bone's local rest-forward axis (auto-detected from rig geometry)
-  const restFwd = boneForwardMap[boneName] || new THREE.Vector3(0, 1, 0);
-
-  // Dot product guard against degenerate anti-parallel case
-  const dot = restFwd.dot(dirInPalm);
-  let deltaQuat;
-  if (dot < -0.9999) {
-    // 180° — pick a perpendicular axis
-    const perp = Math.abs(restFwd.x) < 0.9
-      ? new THREE.Vector3(1, 0, 0)
-      : new THREE.Vector3(0, 0, 1);
-    const axis = new THREE.Vector3().crossVectors(restFwd, perp).normalize();
-    deltaQuat = new THREE.Quaternion().setFromAxisAngle(axis, Math.PI);
-  } else {
-    deltaQuat = new THREE.Quaternion().setFromUnitVectors(restFwd, dirInPalm);
-  }
-
-  // Compose: restQuat brings the bone to its bind pose,
-  // then deltaQuat rotates it to match the live finger direction.
-  const restQuat  = restQuatMap[boneName] || new THREE.Quaternion();
-  const finalQuat = restQuat.clone().multiply(deltaQuat);
-
-  bone.quaternion.slerp(finalQuat, lerpT);
-}
-
-// Helper: safely get a landmark object (returns null if missing or all-zero)
-function lm(landmarks, idx) {
-  const l = landmarks[idx];
-  if (!l) return null;
-  if (l.x === 0 && l.y === 0 && (!l.z || l.z === 0)) return null;
-  return l;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bone smoothing helpers
+// Math helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Angle between two unit vectors (safe, returns 0–π) */
+function angleBetween(a, b) {
+  return Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1));
+}
+
+/** Simple lerp for a scalar value */
+function lerp1(current, target, t) {
+  return current + (target - current) * t;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bone helpers
 // ─────────────────────────────────────────────────────────────────────────────
 function smoothBone(boneName, euler, t = LERP_ARM) {
   const bone = boneMap[boneName];
   if (!bone) return;
-  bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, euler.x, t);
-  bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, euler.y, t);
-  bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, euler.z, t);
+  bone.rotation.x = lerp1(bone.rotation.x, euler.x, t);
+  bone.rotation.y = lerp1(bone.rotation.y, euler.y, t);
+  bone.rotation.z = lerp1(bone.rotation.z, euler.z, t);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render / animation loop
+// Render loop
 // ─────────────────────────────────────────────────────────────────────────────
 function animate(ts) {
   requestAnimationFrame(animate);
   controls.update();
 
   if (playing && motionData && !scrubbing) {
-    const dt      = ts - lastTime;
-    frameTimer   += dt * speed;
+    const dt = ts - lastTime;
+    frameTimer += dt * speed;
     const frameDur = 1000 / motionData.fps;
 
     while (frameTimer >= frameDur) {
       frameTimer -= frameDur;
       frameIdx++;
       if (frameIdx >= motionData.total_frames) {
-        if (looping) {
-          frameIdx = 0;
-          crossfadeAlpha = 0.0;
-        } else {
+        if (looping) { frameIdx = 0; crossfadeAlpha = 0.0; }
+        else {
           frameIdx = motionData.total_frames - 1;
           playing  = false;
           document.getElementById('btn-play').disabled  = false;
@@ -728,21 +654,17 @@ function animate(ts) {
         }
       }
     }
-
-    if (crossfadeAlpha < 1.0)
-      crossfadeAlpha = Math.min(1.0, crossfadeAlpha + 1.0 / CROSSFADE_FRAMES);
-
+    if (crossfadeAlpha < 1.0) crossfadeAlpha = Math.min(1.0, crossfadeAlpha + 1.0/CROSSFADE_FRAMES);
     applyFrame(frameIdx, crossfadeAlpha);
     updateScrubber();
   }
-
   lastTime = ts;
   renderer.render(scene, camera);
 }
 
 function updateScrubber() {
   if (!motionData) return;
-  document.getElementById('scrubber').value      = frameIdx;
+  document.getElementById('scrubber').value       = frameIdx;
   document.getElementById('time-cur').textContent = (frameIdx / motionData.fps).toFixed(1) + 's';
 }
 
@@ -751,10 +673,8 @@ function updateScrubber() {
 // ─────────────────────────────────────────────────────────────────────────────
 function setStatus(msg, cls = '') {
   const el = document.getElementById('status');
-  el.textContent = msg;
-  el.className   = cls;
+  el.textContent = msg; el.className = cls;
 }
-
 function tryEnablePlay() {
   if (avatar && motionData) {
     document.getElementById('btn-play').disabled  = false;
@@ -768,17 +688,13 @@ function tryEnablePlay() {
 // File inputs & drag-drop
 // ─────────────────────────────────────────────────────────────────────────────
 document.getElementById('glb-input').addEventListener('change', e => {
-  const f = e.target.files[0];
-  if (f) loadGLB(URL.createObjectURL(f), f.name);
+  const f = e.target.files[0]; if (f) loadGLB(URL.createObjectURL(f), f.name);
 });
-
 document.getElementById('json-input').addEventListener('change', async e => {
-  const f = e.target.files[0];
-  if (!f) return;
+  const f = e.target.files[0]; if (!f) return;
   try { loadMotionJSON(await readJSONFile(f), f.name); }
-  catch (err) { setStatus('❌ ' + err, 'err'); console.error(err); }
+  catch(err) { setStatus('❌ ' + err, 'err'); console.error(err); }
 });
-
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', async e => {
   e.preventDefault();
@@ -788,14 +704,14 @@ document.addEventListener('drop', async e => {
       loadGLB(URL.createObjectURL(f), f.name);
     } else if (n.endsWith('.json')) {
       try { loadMotionJSON(await readJSONFile(f), f.name); }
-      catch (err) { setStatus('❌ ' + err, 'err'); console.error(err); }
+      catch(err) { setStatus('❌ ' + err, 'err'); }
     } else {
-      setStatus(`❌ Unsupported file: "${f.name}". Drop a .glb or .json.`, 'err');
+      setStatus(`❌ Unsupported: "${f.name}". Drop a .glb or .json.`, 'err');
     }
   }
 });
 
-// Playback controls
+// Playback buttons
 document.getElementById('btn-play').addEventListener('click', () => {
   playing = true;
   document.getElementById('btn-play').disabled  = true;
@@ -824,7 +740,7 @@ scrubEl.addEventListener('input', () => {
   applyFrame(frameIdx, 1.0); updateScrubber();
 });
 
-// Speed
+// Speed buttons
 document.querySelectorAll('.speed-btn').forEach(btn =>
   btn.addEventListener('click', () => {
     speed = parseFloat(btn.dataset.speed);
@@ -844,7 +760,7 @@ document.getElementById('toggle-skeleton').addEventListener('change', e => {
   }
 });
 
-// Loop
+// Loop toggle
 document.getElementById('toggle-loop').addEventListener('change', e => { looping = e.target.checked; });
 
 // Start

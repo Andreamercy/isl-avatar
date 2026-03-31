@@ -186,17 +186,17 @@ const POSE_IDX = {
   LEFT_HIP:      23, RIGHT_HIP:      24,
 };
 
-// Finger chain: MCP index → [pip, dip, tip] bone names, per side
-// Each entry maps: landmark_index → bone_name
+// Finger chains: mcp = knuckle landmark index, joints = [pip, dip, tip] indices
+// bones = bone name suffixes (appended to "LeftHand" / "RightHand")
 const HAND_FINGER_CHAINS = {
-  Thumb:  { mcp: 1, joints: [2, 3, 4],  bones: ['Thumb2','Thumb3','Thumb4']  },
-  Index:  { mcp: 5, joints: [6, 7, 8],  bones: ['Index2','Index3','Index4']  },
-  Middle: { mcp: 9, joints: [10,11,12], bones: ['Middle2','Middle3','Middle4']},
-  Ring:   { mcp:13, joints: [14,15,16], bones: ['Ring2','Ring3','Ring4']      },
-  Pinky:  { mcp:17, joints: [18,19,20], bones: ['Pinky2','Pinky3','Pinky4']  },
+  Thumb:  { mcp: 1, joints: [2, 3, 4],   bones: ['Thumb2','Thumb3','Thumb4']   },
+  Index:  { mcp: 5, joints: [6, 7, 8],   bones: ['Index2','Index3','Index4']   },
+  Middle: { mcp: 9, joints: [10,11,12],  bones: ['Middle2','Middle3','Middle4'] },
+  Ring:   { mcp:13, joints: [14,15,16],  bones: ['Ring2','Ring3','Ring4']       },
+  Pinky:  { mcp:17, joints: [18,19,20],  bones: ['Pinky2','Pinky3','Pinky4']   },
 };
 
-// MCP bones (knuckles) — rotate to spread/curl the whole finger
+// MCP (knuckle) bones — bone name suffixes
 const MCP_BONES = {
   Thumb:  'Thumb1',
   Index:  'Index1',
@@ -205,8 +205,8 @@ const MCP_BONES = {
   Pinky:  'Pinky1',
 };
 
-const LERP_ARM  = 0.5;   // arm smoothing (slightly slower for natural feel)
-const LERP_HAND = 0.65;  // hand smoothing
+const LERP_ARM  = 0.5;
+const LERP_HAND = 0.55;
 const CROSSFADE_FRAMES = 6;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,7 +267,8 @@ window.addEventListener('resize', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 let avatar         = null;
 let boneMap        = {};
-let restQuatMap    = {};   // stores bone rest quaternions for local-space retargeting
+let restQuatMap    = {};   // bone rest quaternions (bind pose)
+let boneForwardMap = {};   // detected local rest-forward axis per bone (+X or +Y)
 let motionData     = null;
 let skeletonHelper = null;
 
@@ -281,11 +282,11 @@ let scrubbing      = false;
 let crossfadeAlpha = 1.0;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GLB loading — capture rest pose quaternions after load
+// GLB loading
 // ─────────────────────────────────────────────────────────────────────────────
 function loadGLB(url, name) {
   setStatus('Loading avatar…', 'info');
-  if (avatar)         { scene.remove(avatar); boneMap = {}; restQuatMap = {}; }
+  if (avatar)         { scene.remove(avatar); boneMap = {}; restQuatMap = {}; boneForwardMap = {}; }
   if (skeletonHelper) { scene.remove(skeletonHelper); skeletonHelper = null; }
 
   new GLTFLoader().load(url, gltf => {
@@ -302,11 +303,13 @@ function loadGLB(url, name) {
         obj.skeleton.bones.forEach(b => { boneMap[b.name] = b; });
     });
 
-    // Store the rest-pose quaternion for every bone.
-    // We'll use these as the baseline so finger rotations are computed
-    // relative to the bone's natural resting orientation.
-    for (const [name, bone] of Object.entries(boneMap)) {
-      restQuatMap[name] = bone.quaternion.clone();
+    // Store rest quaternions and auto-detect each finger bone's local forward axis.
+    // Finger bones in RPM/Mixamo rigs point along +Y in local space,
+    // whereas some rigs use +X. We detect this by checking which child
+    // lies further along +X vs +Y in the bone's local frame.
+    for (const [bName, bone] of Object.entries(boneMap)) {
+      restQuatMap[bName] = bone.quaternion.clone();
+      boneForwardMap[bName] = detectBoneForwardAxis(bone);
     }
 
     scene.add(avatar);
@@ -320,6 +323,31 @@ function loadGLB(url, name) {
   }, undefined, err => {
     setStatus(`❌ Failed to load GLB: ${err.message}`, 'err');
   });
+}
+
+/**
+ * Auto-detect whether a bone's rest-pose forward axis is +X or +Y (local space).
+ *
+ * Strategy: look at the first child bone position in this bone's local space.
+ * Whichever local axis the child sits further along is the forward axis.
+ * Falls back to +Y (most common in RPM/Mixamo-style finger bones).
+ */
+function detectBoneForwardAxis(bone) {
+  const child = bone.children.find(c => c.isBone || c.type === 'Bone');
+  if (!child) return new THREE.Vector3(0, 1, 0); // leaf bone — assume +Y
+
+  // child.position is already in bone-local space
+  const localPos = child.position.clone();
+  if (localPos.lengthSq() < 1e-10) return new THREE.Vector3(0, 1, 0);
+
+  const absX = Math.abs(localPos.x);
+  const absY = Math.abs(localPos.y);
+  const absZ = Math.abs(localPos.z);
+  const max  = Math.max(absX, absY, absZ);
+
+  if (max === absX) return new THREE.Vector3(Math.sign(localPos.x), 0, 0);
+  if (max === absY) return new THREE.Vector3(0, Math.sign(localPos.y), 0);
+  return new THREE.Vector3(0, 0, Math.sign(localPos.z));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -476,121 +504,130 @@ function computeSpineTilt(lS, rS, lH, rH) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HAND retargeting — complete rewrite
+// HAND retargeting — landmark-space → bone-local-space mapping
 //
-// Key insight: MediaPipe gives us 3D landmark positions in *camera space*.
-// GLB bones live in *local bone space* where:
-//   - fingers point roughly along +X (for right hand) or -X (for left hand)
-//   - palm faces roughly along -Z (forward)
+// MediaPipe hand landmarks are in normalised image/camera space:
+//   X: right is positive (mirrored for the person's right hand in selfie mode)
+//   Y: down is positive
+//   Z: depth (smaller = closer to camera)
 //
-// Strategy:
-//   1. Build a palm coordinate frame from the wrist + knuckle landmarks.
-//   2. Express each finger-segment direction in that palm frame.
-//   3. Map the palm-frame direction onto the bone's local rest axes.
-//   4. This correctly translates curl/splay/twist into bone rotations
-//      regardless of how the arm is oriented in world space.
+// We build a palm coordinate frame from the wrist + knuckle row, then for
+// each finger segment we:
+//   1. Compute the segment direction in camera space
+//   2. Remove the gross hand orientation by expressing it in palm space
+//   3. Compute the rotation from the bone's local rest-forward axis to that
+//      palm-space direction and apply it on top of the rest quaternion
+//
+// Chirality note:
+//   MediaPipe VIDEO mode returns hand landmarks as seen in the raw (un-mirrored)
+//   frame.  "Left" from MediaPipe's perspective is the person's RIGHT hand.
+//   We handle this by:
+//     - Using sx = -1 for the person's Left hand, sx = +1 for Right
+//     - Flipping Y (screen-down → world-up)
+//     - NOT flipping Z (depth is consistent for both hands)
 // ─────────────────────────────────────────────────────────────────────────────
 function applyHand(landmarks, side) {
   if (!landmarks || landmarks.length < 21) return;
 
   const isLeft = side === 'Left';
-  const prefix = side;         // 'Left' or 'Right'
-  const sx     = isLeft ? -1 : 1;  // MediaPipe X mirror sign
+  const prefix = side;          // 'Left' or 'Right'
+  // MediaPipe VIDEO mode: sx=-1 flips the mirrored X back to world-space right
+  const sx = isLeft ? -1 : 1;
 
-  // ── Step 1: Build palm coordinate frame from landmarks ──────────────────
-  // wrist = landmark 0
-  // knuckle row = landmarks 5 (index MCP), 9 (middle MCP), 13 (ring MCP), 17 (pinky MCP)
-  const w  = lm(landmarks, 0);
-  const i5 = lm(landmarks, 5);
-  const m9 = lm(landmarks, 9);
-  const p17= lm(landmarks, 17);
+  // ── Step 1: Palm coordinate frame ────────────────────────────────────────
+  // Landmark indices:
+  //   0  = wrist
+  //   5  = index MCP (knuckle)
+  //   9  = middle MCP
+  //   13 = ring MCP
+  //   17 = pinky MCP
+  const w   = lm(landmarks, 0);
+  const i5  = lm(landmarks, 5);
+  const m9  = lm(landmarks, 9);
+  const p17 = lm(landmarks, 17);
 
   if (!w || !i5 || !m9) return;
 
-  // Palm forward axis: wrist → middle knuckle
-  const palmFwd = new THREE.Vector3(
-    (m9.x - w.x) * sx,
-    -(m9.y - w.y),
-    (m9.z || 0) - (w.z || 0)
-  );
-  if (palmFwd.lengthSq() < 1e-6) return;
+  // Convert to right-handed world-like space: flip Y, mirror X for left hand
+  const toWorld = (l) => new THREE.Vector3(l.x * sx, -l.y, l.z || 0);
+
+  const wW   = toWorld(w);
+  const i5W  = toWorld(i5);
+  const m9W  = toWorld(m9);
+  const p17W = p17 ? toWorld(p17) : null;
+
+  // Palm forward: wrist → middle MCP
+  const palmFwd = m9W.clone().sub(wW);
+  if (palmFwd.lengthSq() < 1e-8) return;
   palmFwd.normalize();
 
-  // Palm right axis: index knuckle → pinky knuckle (across palm)
-  const palmRight = p17 ? new THREE.Vector3(
-    (p17.x - i5.x) * sx,
-    -(p17.y - i5.y),
-    (p17.z || 0) - (i5.z || 0)
-  ).normalize() : new THREE.Vector3(sx, 0, 0);
+  // Palm side: index MCP → pinky MCP (points toward pinky)
+  // For left hand this naturally points leftward, for right hand rightward.
+  const palmSide = p17W
+    ? p17W.clone().sub(i5W).normalize()
+    : new THREE.Vector3(isLeft ? -1 : 1, 0, 0);
 
-  // Palm up axis: cross product (ensures orthogonality)
-  const palmUp = new THREE.Vector3().crossVectors(palmFwd, palmRight).normalize();
-  // Re-orthogonalise right
-  palmRight.crossVectors(palmUp, palmFwd).normalize();
+  // Palm up (dorsal direction): perpendicular to both
+  // Use cross(palmFwd, palmSide) — order matters for consistent normal direction
+  const palmUp = new THREE.Vector3().crossVectors(palmFwd, palmSide);
+  if (palmUp.lengthSq() < 1e-8) return;
+  palmUp.normalize();
 
-  // Palm rotation matrix: columns are palmRight, palmUp, palmFwd
-  const palmMat = new THREE.Matrix4().makeBasis(palmRight, palmUp, palmFwd);
+  // Re-orthogonalise side axis
+  const palmSideOrtho = new THREE.Vector3().crossVectors(palmUp, palmFwd).normalize();
+
+  // Build rotation matrix: columns = [palmSideOrtho, palmUp, palmFwd]
+  // This maps local palm axes → world axes
+  const palmMat  = new THREE.Matrix4().makeBasis(palmSideOrtho, palmUp, palmFwd);
   const palmQuat = new THREE.Quaternion().setFromRotationMatrix(palmMat);
 
-  // ── Step 2: Apply wrist bone rotation ──────────────────────────────────
-  // The wrist bone (LeftHand / RightHand) should rotate to match palmQuat.
-  // We want the bone's local rotation = inv(parentWorldQuat) * palmQuat,
-  // but since arms already handle the gross world orientation, we apply
-  // a delta from the bone's rest pose.
+  // ── Step 2: Wrist bone rotation ──────────────────────────────────────────
+  // The wrist bone (LeftHand / RightHand) should orient to match the palm.
+  // We compute its desired local quaternion = inv(parentWorld) * palmQuat.
   const wristBoneName = prefix + 'Hand';
   const wristBone     = boneMap[wristBoneName];
   if (wristBone) {
-    // Get parent's current world quaternion so we work in local space
     const parentWorldQuat = new THREE.Quaternion();
     if (wristBone.parent) wristBone.parent.getWorldQuaternion(parentWorldQuat);
 
-    // Target local quat: what the bone needs to be in its parent's space
-    const targetLocalQuat = palmQuat.clone()
-      .premultiply(parentWorldQuat.clone().invert());
+    // Desired local quaternion for the wrist bone
+    const targetLocalQuat = palmQuat.clone().premultiply(parentWorldQuat.clone().invert());
 
-    // Slerp toward target
+    // Slerp toward target, preserving smoothness
     wristBone.quaternion.slerp(targetLocalQuat, LERP_HAND);
   }
 
-  // ── Step 3: Apply finger bone rotations ────────────────────────────────
-  // For each finger segment we:
-  //   a) Get the segment direction in camera space
-  //   b) Express it in palm space (removing gross hand orientation)
-  //   c) Map to bone-local rotation using the bone's rest quaternion
+  // ── Step 3: Finger bone rotations ────────────────────────────────────────
+  // We work entirely in palm space to remove the gross wrist orientation.
   const palmQuatInv = palmQuat.clone().invert();
 
   for (const [fingerName, chain] of Object.entries(HAND_FINGER_CHAINS)) {
     const mcpBoneName = prefix + 'Hand' + MCP_BONES[fingerName];
     const mcpLmIdx    = chain.mcp;
 
-    // MCP bone — direction from wrist to this knuckle, expressed in palm space
-    const mcpLm = lm(landmarks, mcpLmIdx);
-    if (mcpLm && w) {
-      const segDir = new THREE.Vector3(
-        (mcpLm.x - w.x) * sx,
-        -(mcpLm.y - w.y),
-        (mcpLm.z || 0) - (w.z || 0)
-      ).normalize();
-      applyFingerBoneRotation(mcpBoneName, segDir, palmQuatInv, LERP_HAND);
+    // MCP bone: direction from wrist to this knuckle in palm space
+    const mcpLmRaw = lm(landmarks, mcpLmIdx);
+    if (mcpLmRaw) {
+      const mcpW  = toWorld(mcpLmRaw);
+      const segDir = mcpW.clone().sub(wW).normalize();
+      applyFingerBone(mcpBoneName, segDir, palmQuatInv, LERP_HAND);
     }
 
-    // PIP / DIP / TIP bones — direction from parent landmark to child
+    // PIP / DIP / TIP bones: direction from parent to child landmark
     for (let j = 0; j < chain.joints.length; j++) {
       const boneName  = prefix + 'Hand' + chain.bones[j];
       const childIdx  = chain.joints[j];
       const parentIdx = j === 0 ? mcpLmIdx : chain.joints[j - 1];
 
-      const childLm  = lm(landmarks, childIdx);
-      const parentLm = lm(landmarks, parentIdx);
-      if (!childLm || !parentLm) continue;
+      const childLmRaw  = lm(landmarks, childIdx);
+      const parentLmRaw = lm(landmarks, parentIdx);
+      if (!childLmRaw || !parentLmRaw) continue;
 
-      const segDir = new THREE.Vector3(
-        (childLm.x - parentLm.x) * sx,
-        -(childLm.y - parentLm.y),
-        (childLm.z || 0) - (parentLm.z || 0)
-      ).normalize();
+      const childW  = toWorld(childLmRaw);
+      const parentW = toWorld(parentLmRaw);
+      const segDir  = childW.clone().sub(parentW).normalize();
 
-      applyFingerBoneRotation(boneName, segDir, palmQuatInv, LERP_HAND);
+      applyFingerBone(boneName, segDir, palmQuatInv, LERP_HAND);
     }
   }
 }
@@ -598,54 +635,57 @@ function applyHand(landmarks, side) {
 /**
  * Rotate a finger bone so it points along `segDirWorld`.
  *
- * We transform segDirWorld into the palm's local frame (removing the gross
- * hand rotation), then into the bone's local rest frame, then compute the
- * minimal rotation from the bone's rest forward axis to that direction.
+ * Algorithm:
+ *   1. Transform segDirWorld into palm-local space (removes hand orientation).
+ *   2. The bone's rest-forward axis is fetched from boneForwardMap (auto-detected).
+ *   3. Compute the minimal quaternion rotation from restFwd → dirInPalm.
+ *   4. The final bone quaternion = restQuat * deltaQuat
+ *      (restQuat keeps the bind-pose offset; deltaQuat adds the finger pose).
+ *   5. Slerp the bone's current quaternion toward the final target.
  *
- * @param {string}              boneName     GLB bone name
- * @param {THREE.Vector3}       segDirWorld  segment direction in camera/world space
- * @param {THREE.Quaternion}    palmQuatInv  inverse of palm coordinate frame quaternion
- * @param {number}              lerpT        smoothing factor
+ * @param {string}           boneName    GLB bone name
+ * @param {THREE.Vector3}    segDirWorld segment direction in world/camera space
+ * @param {THREE.Quaternion} palmQuatInv inverse palm-frame quaternion
+ * @param {number}           lerpT       smoothing factor 0–1
  */
-function applyFingerBoneRotation(boneName, segDirWorld, palmQuatInv, lerpT) {
+function applyFingerBone(boneName, segDirWorld, palmQuatInv, lerpT) {
   const bone = boneMap[boneName];
   if (!bone) return;
 
-  // Direction in palm-local space
+  // Express the segment direction in palm space
   const dirInPalm = segDirWorld.clone().applyQuaternion(palmQuatInv);
-
-  // The bone's rest-pose forward direction in its own local space is +X
-  // (for most humanoid rigs using the Ready Player Me / Mixamo convention).
-  // We rotate from +X to dirInPalm.
-  const restFwd = new THREE.Vector3(1, 0, 0);
-  if (dirInPalm.lengthSq() < 1e-6) return;
+  if (dirInPalm.lengthSq() < 1e-8) return;
   dirInPalm.normalize();
 
-  // Avoid degenerate rotation (vectors nearly anti-parallel)
+  // The bone's local rest-forward axis (auto-detected from rig geometry)
+  const restFwd = boneForwardMap[boneName] || new THREE.Vector3(0, 1, 0);
+
+  // Dot product guard against degenerate anti-parallel case
   const dot = restFwd.dot(dirInPalm);
+  let deltaQuat;
   if (dot < -0.9999) {
-    // 180° flip — rotate around Z
-    bone.quaternion.slerp(
-      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI),
-      lerpT
-    );
-    return;
+    // 180° — pick a perpendicular axis
+    const perp = Math.abs(restFwd.x) < 0.9
+      ? new THREE.Vector3(1, 0, 0)
+      : new THREE.Vector3(0, 0, 1);
+    const axis = new THREE.Vector3().crossVectors(restFwd, perp).normalize();
+    deltaQuat = new THREE.Quaternion().setFromAxisAngle(axis, Math.PI);
+  } else {
+    deltaQuat = new THREE.Quaternion().setFromUnitVectors(restFwd, dirInPalm);
   }
 
-  const targetQuat = new THREE.Quaternion().setFromUnitVectors(restFwd, dirInPalm);
-
-  // Apply relative to rest quaternion so we don't fight the bind pose
-  const restQuat = restQuatMap[boneName] || new THREE.Quaternion();
-  const finalQuat = restQuat.clone().multiply(targetQuat);
+  // Compose: restQuat brings the bone to its bind pose,
+  // then deltaQuat rotates it to match the live finger direction.
+  const restQuat  = restQuatMap[boneName] || new THREE.Quaternion();
+  const finalQuat = restQuat.clone().multiply(deltaQuat);
 
   bone.quaternion.slerp(finalQuat, lerpT);
 }
 
-// Helper: safely get a landmark (returns null if missing/degenerate)
+// Helper: safely get a landmark object (returns null if missing or all-zero)
 function lm(landmarks, idx) {
   const l = landmarks[idx];
   if (!l) return null;
-  // Reject landmarks where x,y,z are all exactly 0 (undetected)
   if (l.x === 0 && l.y === 0 && (!l.z || l.z === 0)) return null;
   return l;
 }

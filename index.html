@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ISL Avatar – Motion Player</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0e0e14; color: #e8e8f0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+
+  #canvas-container { position: fixed; inset: 0; }
+
+  /* ── Side Panel ─────────────────────────────────────────────────── */
+  #panel {
+    position: fixed; top: 0; right: 0; width: 300px; height: 100vh;
+    background: rgba(10,10,20,0.85); backdrop-filter: blur(14px);
+    border-left: 1px solid rgba(255,255,255,0.07);
+    display: flex; flex-direction: column; padding: 20px; gap: 14px;
+    z-index: 10; overflow-y: auto;
+  }
+  h1 { font-size: 15px; font-weight: 700; letter-spacing: .06em;
+       color: #a78bfa; text-transform: uppercase; }
+  label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing:.05em; }
+
+  .file-btn {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 8px;
+    background: rgba(167,139,250,0.12); border: 1px dashed rgba(167,139,250,0.35);
+    cursor: pointer; font-size: 12px; color: #c4b5fd; transition: background .2s;
+  }
+  .file-btn:hover { background: rgba(167,139,250,0.22); }
+  .file-btn input { display: none; }
+  .file-btn .icon { font-size: 18px; }
+
+  #status {
+    font-size: 11px; padding: 8px 10px; border-radius: 6px;
+    background: rgba(255,255,255,0.05); color: #aaa; min-height: 34px;
+    line-height: 1.5;
+  }
+  #status.ok  { color: #6ee7b7; background: rgba(110,231,183,0.08); }
+  #status.err { color: #fca5a5; background: rgba(252,165,165,0.08); }
+
+  /* ── Controls ───────────────────────────────────────────────────── */
+  .controls { display: flex; gap: 8px; }
+  button {
+    flex: 1; padding: 9px 6px; border-radius: 7px; border: none;
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity .15s;
+  }
+  button:disabled { opacity: .35; cursor: default; }
+  #btn-play  { background: #7c3aed; color: #fff; }
+  #btn-pause { background: #374151; color: #d1d5db; }
+  #btn-reset { background: #1f2937; color: #9ca3af; }
+  button:not(:disabled):hover { opacity: .82; }
+
+  /* ── Scrubber ───────────────────────────────────────────────────── */
+  .scrubber-wrap { display: flex; flex-direction: column; gap: 6px; }
+  input[type=range] {
+    -webkit-appearance: none; width: 100%; height: 4px;
+    border-radius: 2px; background: #374151; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: #7c3aed; cursor: pointer;
+  }
+  .time-row { display: flex; justify-content: space-between; font-size: 10px; color: #6b7280; }
+
+  /* ── Speed ──────────────────────────────────────────────────────── */
+  .speed-row { display: flex; gap: 5px; }
+  .speed-btn {
+    flex: 1; padding: 5px 2px; font-size: 11px; border-radius: 5px;
+    background: #1f2937; color: #9ca3af;
+  }
+  .speed-btn.active { background: #7c3aed; color: #fff; }
+
+  /* ── Stats ──────────────────────────────────────────────────────── */
+  .stats {
+    font-size: 10px; color: #4b5563; line-height: 1.8;
+    border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px;
+  }
+  .stats span { color: #9ca3af; }
+
+  /* ── Skeleton toggle ────────────────────────────────────────────── */
+  .toggle-row { display: flex; align-items: center; gap: 10px; }
+  .toggle-row label { font-size: 12px; color: #9ca3af; text-transform: none; letter-spacing: 0; }
+  input[type=checkbox] { accent-color: #7c3aed; width: 14px; height: 14px; cursor: pointer; }
+
+  /* ── Overlay loading ────────────────────────────────────────────── */
+  #overlay {
+    position: fixed; inset: 0; background: #0e0e14;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; z-index: 100;
+  }
+  #overlay h2 { font-size: 22px; color: #a78bfa; }
+  #overlay p  { font-size: 13px; color: #666; }
+  .spinner {
+    width: 44px; height: 44px; border: 3px solid rgba(167,139,250,0.2);
+    border-top-color: #7c3aed; border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <div class="spinner"></div>
+  <h2>ISL Avatar</h2>
+  <p>Loading Three.js…</p>
+</div>
+
+<div id="canvas-container"></div>
+
+<!-- ── Side Panel ──────────────────────────────────────────────── -->
+<div id="panel">
+  <h1>🤟 ISL Avatar</h1>
+
+  <!-- Load GLB -->
+  <div>
+    <label>Avatar (.glb)</label>
+    <label class="file-btn" style="margin-top:6px">
+      <span class="icon">🧍</span>
+      <span id="glb-name">Drop or click to load GLB</span>
+      <input type="file" id="glb-input" accept=".glb,.gltf" />
+    </label>
+  </div>
+
+  <!-- Load Motion JSON -->
+  <div>
+    <label>Motion JSON</label>
+    <label class="file-btn" style="margin-top:6px">
+      <span class="icon">📂</span>
+      <span id="json-name">Drop or click to load JSON</span>
+      <input type="file" id="json-input" accept=".json" />
+    </label>
+  </div>
+
+  <div id="status">Load a GLB avatar and a motion JSON to begin.</div>
+
+  <!-- Playback -->
+  <div>
+    <label>Playback</label>
+    <div class="controls" style="margin-top:6px">
+      <button id="btn-play"  disabled>▶ Play</button>
+      <button id="btn-pause" disabled>⏸</button>
+      <button id="btn-reset" disabled>⏮</button>
+    </div>
+  </div>
+
+  <!-- Scrubber -->
+  <div class="scrubber-wrap">
+    <input type="range" id="scrubber" min="0" max="100" value="0" disabled />
+    <div class="time-row">
+      <span id="time-cur">0.0s</span>
+      <span id="time-tot">0.0s</span>
+    </div>
+  </div>
+
+  <!-- Speed -->
+  <div>
+    <label>Speed</label>
+    <div class="speed-row" style="margin-top:6px">
+      <button class="speed-btn" data-speed="0.5">0.5×</button>
+      <button class="speed-btn active" data-speed="1">1×</button>
+      <button class="speed-btn" data-speed="1.5">1.5×</button>
+      <button class="speed-btn" data-speed="2">2×</button>
+    </div>
+  </div>
+
+  <!-- Toggles -->
+  <div class="toggle-row">
+    <input type="checkbox" id="toggle-skeleton" />
+    <label for="toggle-skeleton">Show skeleton overlay</label>
+  </div>
+  <div class="toggle-row">
+    <input type="checkbox" id="toggle-loop" checked />
+    <label for="toggle-loop">Loop animation</label>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats" id="stats">
+    Frames: <span>—</span><br>
+    FPS: <span>—</span><br>
+    Duration: <span>—</span><br>
+    Landmarks/frame: <span>—</span>
+  </div>
+</div>
+
+<!-- ── Three.js ─────────────────────────────────────────────────── -->
+<script type="importmap">
+{
+  "imports": {
+    "three":            "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/":    "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader }       from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
+import { RGBELoader }       from 'three/addons/loaders/RGBELoader.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MediaPipe Pose indices for the joints we care about (upper body)
+// ─────────────────────────────────────────────────────────────────────────────
+const POSE_IDX = {
+  NOSE:           0,
+  LEFT_SHOULDER:  11, RIGHT_SHOULDER: 12,
+  LEFT_ELBOW:     13, RIGHT_ELBOW:    14,
+  LEFT_WRIST:     15, RIGHT_WRIST:    16,
+  LEFT_HIP:       23, RIGHT_HIP:      24,
+};
+
+// MediaPipe Hand landmark indices
+const HAND_IDX = {
+  WRIST:          0,
+  THUMB_CMC:1, THUMB_MCP:2, THUMB_IP:3,  THUMB_TIP:4,
+  INDEX_MCP:5, INDEX_PIP:6, INDEX_DIP:7, INDEX_TIP:8,
+  MIDDLE_MCP:9, MIDDLE_PIP:10, MIDDLE_DIP:11, MIDDLE_TIP:12,
+  RING_MCP:13,  RING_PIP:14,  RING_DIP:15,  RING_TIP:16,
+  PINKY_MCP:17, PINKY_PIP:18, PINKY_DIP:19, PINKY_TIP:20,
+};
+
+// ── Map MediaPipe hand indices → GLB bone names ──────────────────────────────
+const LEFT_HAND_BONE_MAP = {
+  // Thumb
+  1:'LeftHandThumb1', 2:'LeftHandThumb2', 3:'LeftHandThumb3', 4:'LeftHandThumb4',
+  // Index
+  5:'LeftHandIndex1', 6:'LeftHandIndex2', 7:'LeftHandIndex3', 8:'LeftHandIndex4',
+  // Middle
+  9:'LeftHandMiddle1',10:'LeftHandMiddle2',11:'LeftHandMiddle3',12:'LeftHandMiddle4',
+  // Ring
+  13:'LeftHandRing1', 14:'LeftHandRing2', 15:'LeftHandRing3', 16:'LeftHandRing4',
+  // Pinky
+  17:'LeftHandPinky1',18:'LeftHandPinky2',19:'LeftHandPinky3',20:'LeftHandPinky4',
+};
+
+const RIGHT_HAND_BONE_MAP = {
+  1:'RightHandThumb1', 2:'RightHandThumb2', 3:'RightHandThumb3', 4:'RightHandThumb4',
+  5:'RightHandIndex1', 6:'RightHandIndex2', 7:'RightHandIndex3', 8:'RightHandIndex4',
+  9:'RightHandMiddle1',10:'RightHandMiddle2',11:'RightHandMiddle3',12:'RightHandMiddle4',
+  13:'RightHandRing1', 14:'RightHandRing2', 15:'RightHandRing3', 16:'RightHandRing4',
+  17:'RightHandPinky1',18:'RightHandPinky2',19:'RightHandPinky3',20:'RightHandPinky4',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene setup
+// ─────────────────────────────────────────────────────────────────────────────
+const container = document.getElementById('canvas-container');
+const renderer  = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.toneMapping        = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.outputColorSpace   = THREE.SRGBColorSpace;
+container.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x0e0e14);
+scene.fog        = new THREE.Fog(0x0e0e14, 8, 20);
+
+const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.01, 100);
+camera.position.set(0, 1.4, 2.8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance   = 0.5;
+controls.maxDistance   = 8;
+controls.update();
+
+// Lights
+const ambient  = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambient);
+
+const key = new THREE.DirectionalLight(0xffffff, 1.8);
+key.position.set(2, 4, 3);
+key.castShadow = true;
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0xa78bfa, 0.4);
+fill.position.set(-3, 2, -2);
+scene.add(fill);
+
+const rim = new THREE.DirectionalLight(0x60a5fa, 0.3);
+rim.position.set(0, 3, -4);
+scene.add(rim);
+
+// Floor
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(10, 10),
+  new THREE.MeshStandardMaterial({ color: 0x111118, roughness: 0.95 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// Grid
+const grid = new THREE.GridHelper(10, 20, 0x222233, 0x1a1a28);
+scene.add(grid);
+
+window.addEventListener('resize', () => {
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+let avatar       = null;
+let boneMap      = {};
+let motionData   = null;
+let skeletonHelper = null;
+
+let playing      = false;
+let frameIdx     = 0;
+let speed        = 1.0;
+let looping      = true;
+let lastTime     = 0;
+let frameTimer   = 0;
+let scrubbing    = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load GLB
+// ─────────────────────────────────────────────────────────────────────────────
+function loadGLB(url, name) {
+  setStatus(`Loading avatar…`, '');
+  if (avatar) { scene.remove(avatar); boneMap = {}; }
+  if (skeletonHelper) { scene.remove(skeletonHelper); skeletonHelper = null; }
+
+  const loader = new GLTFLoader();
+  loader.load(url, gltf => {
+    avatar = gltf.scene;
+    avatar.traverse(obj => {
+      if (obj.isMesh) {
+        obj.castShadow    = true;
+        obj.receiveShadow = true;
+        if (obj.material) {
+          obj.material.metalness = 0.0;
+          obj.material.roughness = 0.7;
+        }
+      }
+      if (obj.isBone || obj.type === 'Bone') {
+        boneMap[obj.name] = obj;
+      }
+    });
+
+    // Also capture SkinnedMesh bones via skeleton
+    avatar.traverse(obj => {
+      if (obj.isSkinnedMesh && obj.skeleton) {
+        obj.skeleton.bones.forEach(b => { boneMap[b.name] = b; });
+      }
+    });
+
+    console.log('Bones found:', Object.keys(boneMap));
+    scene.add(avatar);
+
+    // Auto-position: centre at hips ~1m up
+    const box = new THREE.Box3().setFromObject(avatar);
+    const h   = box.max.y - box.min.y;
+    avatar.position.y = -box.min.y;
+
+    setStatus(`✅ Avatar loaded — ${Object.keys(boneMap).length} bones`, 'ok');
+    document.getElementById('glb-name').textContent = name;
+    tryEnablePlay();
+  }, undefined, err => {
+    setStatus(`❌ Failed to load GLB: ${err.message}`, 'err');
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load Motion JSON
+// ─────────────────────────────────────────────────────────────────────────────
+function loadMotionJSON(data, name) {
+  motionData = data;
+  frameIdx   = 0;
+  document.getElementById('json-name').textContent = name;
+
+  const dur  = data.total_frames / data.fps;
+  const lmCount = (data.frames[0]?.pose?.length || 0)
+                + (data.frames[0]?.left_hand?.length || 0)
+                + (data.frames[0]?.right_hand?.length || 0)
+                + (data.frames[0]?.face?.length || 0);
+
+  document.getElementById('stats').innerHTML = `
+    Frames: <span>${data.total_frames}</span><br>
+    FPS: <span>${data.fps.toFixed(1)}</span><br>
+    Duration: <span>${dur.toFixed(2)}s</span><br>
+    Landmarks/frame: <span>${lmCount}</span>
+  `;
+  document.getElementById('scrubber').max   = data.total_frames - 1;
+  document.getElementById('scrubber').value = 0;
+  document.getElementById('time-tot').textContent = dur.toFixed(1) + 's';
+  setStatus(`✅ Motion loaded — "${data.word}"  ${data.total_frames} frames @ ${data.fps.toFixed(0)}fps`, 'ok');
+  tryEnablePlay();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Apply one frame of motion to the avatar skeleton
+// ─────────────────────────────────────────────────────────────────────────────
+function applyFrame(idx) {
+  if (!avatar || !motionData) return;
+  const frame = motionData.frames[idx];
+  if (!frame) return;
+
+  applyPose(frame.pose);
+  applyHand(frame.left_hand,  LEFT_HAND_BONE_MAP,  'Left');
+  applyHand(frame.right_hand, RIGHT_HAND_BONE_MAP, 'Right');
+}
+
+// ── Pose → Bones ─────────────────────────────────────────────────────────────
+function applyPose(pose) {
+  if (!pose || pose.length < 25) return;
+
+  const lShoulder = pose[POSE_IDX.LEFT_SHOULDER];
+  const rShoulder = pose[POSE_IDX.RIGHT_SHOULDER];
+  const lElbow    = pose[POSE_IDX.LEFT_ELBOW];
+  const rElbow    = pose[POSE_IDX.RIGHT_ELBOW];
+  const lWrist    = pose[POSE_IDX.LEFT_WRIST];
+  const rWrist    = pose[POSE_IDX.RIGHT_WRIST];
+
+  // Left arm – upper (LeftArm bone)
+  if (boneMap['LeftArm'] && lShoulder && lElbow) {
+    const rot = computeLimbRotation(lShoulder, lElbow, -1);
+    applyBoneRotation('LeftArm', rot);
+  }
+  // Left arm – lower (LeftForeArm bone)
+  if (boneMap['LeftForeArm'] && lElbow && lWrist) {
+    const rot = computeLimbRotation(lElbow, lWrist, -1);
+    applyBoneRotation('LeftForeArm', rot);
+  }
+  // Right arm – upper
+  if (boneMap['RightArm'] && rShoulder && rElbow) {
+    const rot = computeLimbRotation(rShoulder, rElbow, 1);
+    applyBoneRotation('RightArm', rot);
+  }
+  // Right arm – lower
+  if (boneMap['RightForeArm'] && rElbow && rWrist) {
+    const rot = computeLimbRotation(rElbow, rWrist, 1);
+    applyBoneRotation('RightForeArm', rot);
+  }
+
+  // Spine tilt from shoulder midpoint vs hip midpoint
+  if (pose.length > 24) {
+    const lHip = pose[POSE_IDX.LEFT_HIP];
+    const rHip = pose[POSE_IDX.RIGHT_HIP];
+    if (lHip && rHip && lShoulder && rShoulder) {
+      const spineTilt = computeSpineTilt(lShoulder, rShoulder, lHip, rHip);
+      applyBoneRotation('Spine',  spineTilt.clone().multiplyScalar(0.3));
+      applyBoneRotation('Spine1', spineTilt.clone().multiplyScalar(0.4));
+      applyBoneRotation('Spine2', spineTilt.clone().multiplyScalar(0.3));
+    }
+  }
+
+  // Head – from nose position relative to shoulders
+  const nose = pose[POSE_IDX.NOSE];
+  if (nose && lShoulder && rShoulder && boneMap['Head']) {
+    const neckX = (lShoulder.x + rShoulder.x) / 2;
+    const neckY = (lShoulder.y + rShoulder.y) / 2;
+    const dx = (nose.x - neckX) * 1.5;
+    const dy = (nose.y - neckY) * 1.2;
+    const headRot = new THREE.Euler(
+      THREE.MathUtils.clamp(-dy * Math.PI, -0.4, 0.4),
+      THREE.MathUtils.clamp(dx  * Math.PI, -0.5, 0.5),
+      0,
+      'XYZ'
+    );
+    boneMap['Head'].rotation.copy(headRot);
+    if (boneMap['Neck']) {
+      boneMap['Neck'].rotation.set(headRot.x * 0.4, headRot.y * 0.3, 0);
+    }
+  }
+}
+
+// Compute rotation quaternion from two 3D landmarks (proximal → distal)
+function computeLimbRotation(from, to, side) {
+  const dir = new THREE.Vector3(
+    (to.x - from.x) * side,   // mirror for right side
+    -(to.y - from.y),          // flip Y (MediaPipe Y is down)
+    (to.z || 0) - (from.z || 0)
+  ).normalize();
+
+  const defaultDir = new THREE.Vector3(side, -1, 0).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(defaultDir, dir);
+  return new THREE.Euler().setFromQuaternion(q, 'XYZ');
+}
+
+function computeSpineTilt(lS, rS, lH, rH) {
+  const shoulderMid = { x: (lS.x + rS.x) / 2, y: (lS.y + rS.y) / 2 };
+  const hipMid      = { x: (lH.x + rH.x) / 2, y: (lH.y + rH.y) / 2 };
+  const dx = shoulderMid.x - hipMid.x;
+  const dy = shoulderMid.y - hipMid.y;
+  return new THREE.Euler(
+    THREE.MathUtils.clamp(dy * 0.8, -0.3, 0.3),
+    THREE.MathUtils.clamp(dx * 0.8, -0.3, 0.3),
+    0,
+    'XYZ'
+  );
+}
+
+function applyBoneRotation(boneName, euler) {
+  const bone = boneMap[boneName];
+  if (!bone) return;
+  bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, euler.x, 0.6);
+  bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, euler.y, 0.6);
+  bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, euler.z, 0.6);
+}
+
+// ── Hand → Bones ─────────────────────────────────────────────────────────────
+function applyHand(handLandmarks, boneMapRef, side) {
+  if (!handLandmarks || handLandmarks.length < 21) return;
+  const sign = side === 'Left' ? -1 : 1;
+
+  for (const [idx, boneName] of Object.entries(boneMapRef)) {
+    const i     = parseInt(idx);
+    const child = handLandmarks[i];
+    // Each bone points from its parent landmark to itself
+    const parentIdx = getParentIdx(i);
+    const parent    = handLandmarks[parentIdx];
+    if (!child || !parent) continue;
+
+    const bone = boneMap[boneName];
+    if (!bone) continue;
+
+    const dir = new THREE.Vector3(
+      (child.x - parent.x) * sign,
+      -(child.y - parent.y),
+      (child.z || 0) - (parent.z || 0)
+    ).normalize();
+
+    const defaultDir = new THREE.Vector3(sign, 0, 0).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(defaultDir, dir);
+    const rot = new THREE.Euler().setFromQuaternion(q, 'XYZ');
+
+    bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, rot.x, 0.7);
+    bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, rot.y, 0.7);
+    bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, rot.z, 0.7);
+  }
+
+  // Wrist rotation from wrist→middle_mcp direction
+  const wristBone = boneMap[side + 'Hand'];
+  if (wristBone && handLandmarks[0] && handLandmarks[9]) {
+    const w = handLandmarks[0], m = handLandmarks[9];
+    const dir = new THREE.Vector3(
+      (m.x - w.x) * sign, -(m.y - w.y), (m.z || 0) - (w.z || 0)
+    ).normalize();
+    const def = new THREE.Vector3(sign, 0, 0).normalize();
+    const q   = new THREE.Quaternion().setFromUnitVectors(def, dir);
+    const rot = new THREE.Euler().setFromQuaternion(q, 'XYZ');
+    wristBone.rotation.x = THREE.MathUtils.lerp(wristBone.rotation.x, rot.x, 0.7);
+    wristBone.rotation.y = THREE.MathUtils.lerp(wristBone.rotation.y, rot.y, 0.7);
+    wristBone.rotation.z = THREE.MathUtils.lerp(wristBone.rotation.z, rot.z, 0.7);
+  }
+}
+
+// MediaPipe hand parent indices
+function getParentIdx(i) {
+  if (i === 0) return 0;
+  const groups = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16],[17,18,19,20]];
+  for (const g of groups) {
+    const pos = g.indexOf(i);
+    if (pos === 0) return 0;           // MCP → wrist
+    if (pos > 0)  return g[pos - 1];  // PIP/DIP/TIP → previous
+  }
+  return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Animation loop
+// ─────────────────────────────────────────────────────────────────────────────
+function animate(ts) {
+  requestAnimationFrame(animate);
+  controls.update();
+
+  if (playing && motionData && !scrubbing) {
+    const dt = ts - lastTime;
+    frameTimer += dt * speed;
+    const frameDuration = 1000 / motionData.fps;
+
+    while (frameTimer >= frameDuration) {
+      frameTimer -= frameDuration;
+      frameIdx++;
+      if (frameIdx >= motionData.total_frames) {
+        if (looping) {
+          frameIdx = 0;
+        } else {
+          frameIdx = motionData.total_frames - 1;
+          playing  = false;
+          document.getElementById('btn-play').disabled  = false;
+          document.getElementById('btn-pause').disabled = true;
+        }
+      }
+    }
+    applyFrame(frameIdx);
+    updateScrubber();
+  }
+
+  lastTime = ts;
+  renderer.render(scene, camera);
+}
+
+function updateScrubber() {
+  if (!motionData) return;
+  document.getElementById('scrubber').value = frameIdx;
+  const t = frameIdx / motionData.fps;
+  document.getElementById('time-cur').textContent = t.toFixed(1) + 's';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UI wiring
+// ─────────────────────────────────────────────────────────────────────────────
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent  = msg;
+  el.className    = cls;
+}
+
+function tryEnablePlay() {
+  if (avatar && motionData) {
+    document.getElementById('btn-play').disabled  = false;
+    document.getElementById('btn-reset').disabled = false;
+    document.getElementById('scrubber').disabled  = false;
+    applyFrame(0);
+  }
+}
+
+// GLB file input
+document.getElementById('glb-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  loadGLB(URL.createObjectURL(file), file.name);
+});
+
+// JSON file input
+document.getElementById('json-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      loadMotionJSON(data, file.name);
+    } catch {
+      setStatus('❌ Invalid JSON file', 'err');
+    }
+  };
+  reader.readAsText(file);
+});
+
+// Drag & drop anywhere
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  for (const file of e.dataTransfer.files) {
+    if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) {
+      loadGLB(URL.createObjectURL(file), file.name);
+    } else if (file.name.endsWith('.json')) {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try { loadMotionJSON(JSON.parse(ev.target.result), file.name); }
+        catch { setStatus('❌ Invalid JSON file', 'err'); }
+      };
+      reader.readAsText(file);
+    }
+  }
+});
+
+// Play / Pause / Reset
+document.getElementById('btn-play').addEventListener('click', () => {
+  playing = true;
+  document.getElementById('btn-play').disabled  = true;
+  document.getElementById('btn-pause').disabled = false;
+});
+document.getElementById('btn-pause').addEventListener('click', () => {
+  playing = false;
+  document.getElementById('btn-play').disabled  = false;
+  document.getElementById('btn-pause').disabled = true;
+});
+document.getElementById('btn-reset').addEventListener('click', () => {
+  frameIdx = 0; frameTimer = 0;
+  playing  = false;
+  document.getElementById('btn-play').disabled  = false;
+  document.getElementById('btn-pause').disabled = true;
+  applyFrame(0);
+  updateScrubber();
+});
+
+// Scrubber
+const scrubEl = document.getElementById('scrubber');
+scrubEl.addEventListener('mousedown',  () => { scrubbing = true; });
+scrubEl.addEventListener('touchstart', () => { scrubbing = true; });
+scrubEl.addEventListener('input', () => {
+  frameIdx = parseInt(scrubEl.value);
+  applyFrame(frameIdx);
+  updateScrubber();
+});
+scrubEl.addEventListener('mouseup',  () => { scrubbing = false; });
+scrubEl.addEventListener('touchend', () => { scrubbing = false; });
+
+// Speed buttons
+document.querySelectorAll('.speed-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    speed = parseFloat(btn.dataset.speed);
+    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+// Skeleton toggle
+document.getElementById('toggle-skeleton').addEventListener('change', e => {
+  if (e.target.checked && avatar) {
+    skeletonHelper = new THREE.SkeletonHelper(avatar);
+    skeletonHelper.material.linewidth = 2;
+    scene.add(skeletonHelper);
+  } else if (skeletonHelper) {
+    scene.remove(skeletonHelper);
+    skeletonHelper = null;
+  }
+});
+
+// Loop toggle
+document.getElementById('toggle-loop').addEventListener('change', e => {
+  looping = e.target.checked;
+});
+
+// Hide overlay once Three.js is ready
+document.getElementById('overlay').style.display = 'none';
+
+// Kick off render loop
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

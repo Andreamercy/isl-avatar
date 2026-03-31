@@ -637,35 +637,59 @@ document.getElementById('glb-input').addEventListener('change', e => {
 });
 
 // JSON file input
-document.getElementById('json-input').addEventListener('change', e => {
+function readJSONFile(file) {
+  setStatus(`⏳ Reading ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)…`, '');
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        // Validate structure
+        if (!data.frames || !Array.isArray(data.frames)) {
+          reject('Missing "frames" array in JSON');
+          return;
+        }
+        if (!data.fps || !data.total_frames) {
+          reject('Missing fps or total_frames in JSON');
+          return;
+        }
+        resolve(data);
+      } catch(err) {
+        reject('JSON parse error: ' + err.message);
+      }
+    };
+    reader.onerror = () => reject('File read error');
+    reader.readAsText(file);
+  });
+}
+
+document.getElementById('json-input').addEventListener('change', async e => {
   const file = e.target.files[0];
   if (!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    try {
-      const data = JSON.parse(ev.target.result);
-      loadMotionJSON(data, file.name);
-    } catch {
-      setStatus('❌ Invalid JSON file', 'err');
-    }
-  };
-  reader.readAsText(file);
+  try {
+    const data = await readJSONFile(file);
+    loadMotionJSON(data, file.name);
+  } catch(err) {
+    setStatus('❌ ' + err, 'err');
+    console.error(err);
+  }
 });
 
 // Drag & drop anywhere
 document.addEventListener('dragover', e => e.preventDefault());
-document.addEventListener('drop', e => {
+document.addEventListener('drop', async e => {
   e.preventDefault();
   for (const file of e.dataTransfer.files) {
     if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) {
       loadGLB(URL.createObjectURL(file), file.name);
     } else if (file.name.endsWith('.json')) {
-      const reader = new FileReader();
-      reader.onload = ev => {
-        try { loadMotionJSON(JSON.parse(ev.target.result), file.name); }
-        catch { setStatus('❌ Invalid JSON file', 'err'); }
-      };
-      reader.readAsText(file);
+      try {
+        const data = await readJSONFile(file);
+        loadMotionJSON(data, file.name);
+      } catch(err) {
+        setStatus('❌ ' + err, 'err');
+        console.error(err);
+      }
     }
   }
 });
